@@ -9,7 +9,7 @@ import rclpy
 import yaml
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path as NavPath
-from patrol_interfaces.msg import LocalizationStatus
+from patrol_interfaces.msg import LocalizationStatus, TaskStatus
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -49,6 +49,10 @@ class PatrolRouteFollower(Node):
         self.declare_parameter(
             'lookahead_target_topic',
             '/patrol/lookahead_target',
+        )
+        self.declare_parameter(
+            'status_topic',
+            '/patrol/route_follower/status',
         )
 
         self.declare_parameter('control_rate_hz', 20.0)
@@ -148,6 +152,20 @@ class PatrolRouteFollower(Node):
             10,
         )
 
+        status_qos = QoSProfile(depth=1)
+        status_qos.reliability = ReliabilityPolicy.RELIABLE
+        status_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+
+        self.status_pub = self.create_publisher(
+            TaskStatus,
+            str(
+                self.get_parameter(
+                    'status_topic'
+                ).value
+            ),
+            status_qos,
+        )
+
         self.create_subscription(
             PoseStamped,
             self.pose_topic,
@@ -179,6 +197,11 @@ class PatrolRouteFollower(Node):
         )
 
         self.publish_route_path()
+        self.publish_status(
+            TaskStatus.IDLE,
+            'route follower ready',
+            0.0,
+        )
 
         self.get_logger().info(
             f'route follower ready: '
@@ -281,6 +304,13 @@ class PatrolRouteFollower(Node):
 
             response.success = True
             response.message = 'route follower disabled'
+
+            self.publish_status(
+                TaskStatus.IDLE,
+                response.message,
+                0.0,
+            )
+
             self.get_logger().warning(response.message)
             return response
 
@@ -360,6 +390,16 @@ class PatrolRouteFollower(Node):
             f'heading_error={heading_error_deg:.1f}deg'
         )
 
+        self.publish_status(
+            TaskStatus.RUNNING,
+            response.message,
+            (
+                self.progress_s / self.total_length
+                if self.total_length > 1.0e-6
+                else 0.0
+            ),
+        )
+
         self.get_logger().warning(response.message)
         return response
 
@@ -424,9 +464,16 @@ class PatrolRouteFollower(Node):
         ):
             self.enabled = False
             self.publish_stop()
-            self.get_logger().warning(
-                'route completed; vehicle stopped'
+
+            message = 'route completed; vehicle stopped'
+
+            self.publish_status(
+                TaskStatus.SUCCEEDED,
+                message,
+                1.0,
             )
+
+            self.get_logger().warning(message)
             return
 
         lookahead = max(
@@ -523,6 +570,20 @@ class PatrolRouteFollower(Node):
 
         now = time.monotonic()
         if now - self.last_log_time >= 1.0:
+            progress = (
+                self.progress_s / self.total_length
+                if self.total_length > 1.0e-6
+                else 0.0
+            )
+
+            self.publish_status(
+                TaskStatus.RUNNING,
+                (
+                    f'progress={self.progress_s:.2f}/'
+                    f'{self.total_length:.2f}m'
+                ),
+                progress,
+            )
             self.last_log_time = now
 
             self.get_logger().info(
@@ -712,9 +773,37 @@ class PatrolRouteFollower(Node):
     def safety_stop(self, reason: str) -> None:
         self.enabled = False
         self.publish_stop()
-        self.get_logger().error(
-            f'SAFETY_STOP: {reason}'
+
+        message = f'SAFETY_STOP: {reason}'
+
+        self.publish_status(
+            TaskStatus.FAILED,
+            message,
+            0.0,
         )
+
+        self.get_logger().error(message)
+
+    def publish_status(
+        self,
+        state: int,
+        message: str,
+        progress: float,
+    ) -> None:
+        status = TaskStatus()
+        status.header.stamp = (
+            self.get_clock().now().to_msg()
+        )
+        status.header.frame_id = self.frame_id
+        status.state = int(state)
+        status.task = 'route_following'
+        status.message = str(message)
+        status.progress = float(max(
+            0.0,
+            min(1.0, progress),
+        ))
+
+        self.status_pub.publish(status)
 
     def publish_route_path(self) -> None:
         message = NavPath()

@@ -10,6 +10,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/LocalizationStatus.msg"
   "msg/ControlMode.msg"
   "msg/EntryPath.msg"
+  "msg/TaskStatus.msg"
   "srv/SetControlMode.srv"
   DEPENDENCIES
     std_msgs

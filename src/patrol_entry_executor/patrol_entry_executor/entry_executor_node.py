@@ -6,7 +6,7 @@ from typing import Optional
 
 import rclpy
 from geometry_msgs.msg import PoseStamped
-from patrol_interfaces.msg import EntryPath, LocalizationStatus
+from patrol_interfaces.msg import EntryPath, LocalizationStatus, TaskStatus
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -39,10 +39,24 @@ class PatrolEntryExecutor(Node):
             'command_topic',
             '/patrol/entry_command',
         )
+        self.declare_parameter(
+            'status_topic',
+            '/patrol/entry_executor/status',
+        )
 
         self.declare_parameter('control_rate_hz', 20.0)
         self.declare_parameter('forward_speed_rpm', 20.0)
         self.declare_parameter('reverse_speed_rpm', 15.0)
+
+        self.declare_parameter('wheelbase', 0.67)
+        self.declare_parameter(
+            'lookahead_distance',
+            0.40,
+        )
+        self.declare_parameter(
+            'maximum_tracking_error',
+            0.80,
+        )
 
         self.declare_parameter(
             'maximum_mechanical_steering_deg',
@@ -131,6 +145,20 @@ class PatrolEntryExecutor(Node):
             20,
         )
 
+        status_qos = QoSProfile(depth=1)
+        status_qos.reliability = ReliabilityPolicy.RELIABLE
+        status_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+
+        self.status_pub = self.create_publisher(
+            TaskStatus,
+            str(
+                self.get_parameter(
+                    'status_topic'
+                ).value
+            ),
+            status_qos,
+        )
+
         self.create_service(
             SetBool,
             '/patrol/entry_executor/enable',
@@ -147,6 +175,12 @@ class PatrolEntryExecutor(Node):
         self.create_timer(
             1.0 / control_rate,
             self.control_timer,
+        )
+
+        self.publish_status(
+            TaskStatus.IDLE,
+            'entry executor ready',
+            0.0,
         )
 
         self.get_logger().info(
@@ -268,6 +302,12 @@ class PatrolEntryExecutor(Node):
             f'entry executor enabled: '
             f'points={len(self.entry_path.poses)}, '
             f'start_error={start_error:.2f}m'
+        )
+
+        self.publish_status(
+            TaskStatus.RUNNING,
+            response.message,
+            0.0,
         )
 
         self.get_logger().warning(response.message)
@@ -434,21 +474,129 @@ class PatrolEntryExecutor(Node):
                 f'direction={direction:+d}'
             )
 
-        steering_deg = float(
-            self.entry_path.steering_angles_deg[
-                self.target_index
-            ]
+        current_x = float(
+            self.latest_pose.pose.position.x
+        )
+        current_y = float(
+            self.latest_pose.pose.position.y
         )
 
-        maximum_mechanical = abs(float(
+        current_target = self.entry_path.poses[
+            self.target_index
+        ]
+
+        current_target_distance = math.hypot(
+            current_target.position.x - current_x,
+            current_target.position.y - current_y,
+        )
+
+        maximum_tracking_error = max(
+            0.20,
+            float(
+                self.get_parameter(
+                    'maximum_tracking_error'
+                ).value
+            ),
+        )
+
+        if current_target_distance > maximum_tracking_error:
+            self.safety_stop(
+                f'entry tracking error too large: '
+                f'{current_target_distance:.2f}m > '
+                f'{maximum_tracking_error:.2f}m'
+            )
+            return
+
+        lookahead_distance = max(
+            0.15,
+            float(
+                self.get_parameter(
+                    'lookahead_distance'
+                ).value
+            ),
+        )
+
+        lookahead_index = self.target_index
+        lookahead_target = current_target
+
+        while (
+            lookahead_index + 1
+            < len(self.entry_path.poses)
+        ):
+            next_index = lookahead_index + 1
+            next_direction = int(
+                self.entry_path.directions[next_index]
+            )
+
+            if next_direction != direction:
+                break
+
+            candidate = self.entry_path.poses[
+                next_index
+            ]
+
+            candidate_distance = math.hypot(
+                candidate.position.x - current_x,
+                candidate.position.y - current_y,
+            )
+
+            lookahead_index = next_index
+            lookahead_target = candidate
+
+            if candidate_distance >= lookahead_distance:
+                break
+
+        dx = lookahead_target.position.x - current_x
+        dy = lookahead_target.position.y - current_y
+
+        target_distance = max(
+            0.05,
+            math.hypot(dx, dy),
+        )
+
+        target_heading = math.atan2(dy, dx)
+
+        vehicle_yaw = self.quaternion_to_yaw(
+            self.latest_pose.pose.orientation
+        )
+
+        if direction > 0:
+            travel_heading = vehicle_yaw
+        else:
+            travel_heading = normalize_angle(
+                vehicle_yaw + math.pi
+            )
+
+        heading_error = normalize_angle(
+            target_heading - travel_heading
+        )
+
+        wheelbase = max(
+            0.01,
+            float(
+                self.get_parameter('wheelbase').value
+            ),
+        )
+
+        steering_angle = (
+            direction
+            * math.atan2(
+                2.0
+                * wheelbase
+                * math.sin(heading_error),
+                target_distance,
+            )
+        )
+
+        maximum_mechanical = math.radians(abs(float(
             self.get_parameter(
                 'maximum_mechanical_steering_deg'
             ).value
-        ))
+        )))
 
-        steering_deg = max(
+        steering_angle = max(
             -maximum_mechanical,
-            min(maximum_mechanical, steering_deg),
+            min(maximum_mechanical, steering_angle),
         )
 
         maximum_request = abs(float(
@@ -459,7 +607,7 @@ class PatrolEntryExecutor(Node):
 
         if maximum_mechanical > 1.0e-6:
             steering_request = (
-                steering_deg
+                steering_angle
                 / maximum_mechanical
                 * maximum_request
             )
@@ -496,6 +644,20 @@ class PatrolEntryExecutor(Node):
                 - self.latest_pose.pose.position.x,
                 target.position.y
                 - self.latest_pose.pose.position.y,
+            )
+
+            progress = (
+                self.target_index
+                / max(1, len(self.entry_path.poses) - 1)
+            )
+
+            self.publish_status(
+                TaskStatus.RUNNING,
+                (
+                    f'target={self.target_index}/'
+                    f'{len(self.entry_path.poses) - 1}'
+                ),
+                progress,
             )
 
             self.get_logger().info(
@@ -651,6 +813,11 @@ class PatrolEntryExecutor(Node):
         self.current_direction = 0
         self.pending_direction = 0
         self.publish_stop()
+        self.publish_status(
+            TaskStatus.IDLE,
+            'entry executor disabled',
+            0.0,
+        )
 
     def complete_execution(self) -> None:
         final_pose = self.entry_path.poses[-1]
@@ -676,18 +843,54 @@ class PatrolEntryExecutor(Node):
         self.enabled = False
         self.publish_stop()
 
-        self.get_logger().warning(
+        message = (
             f'entry execution completed: '
             f'position_error={position_error:.2f}m, '
             f'heading_error={heading_error:.1f}deg'
         )
 
+        self.publish_status(
+            TaskStatus.SUCCEEDED,
+            message,
+            1.0,
+        )
+
+        self.get_logger().warning(message)
+
     def safety_stop(self, reason: str) -> None:
         self.enabled = False
         self.publish_stop()
-        self.get_logger().error(
-            f'SAFETY_STOP: {reason}'
+
+        message = f'SAFETY_STOP: {reason}'
+
+        self.publish_status(
+            TaskStatus.FAILED,
+            message,
+            0.0,
         )
+
+        self.get_logger().error(message)
+
+    def publish_status(
+        self,
+        state: int,
+        message: str,
+        progress: float,
+    ) -> None:
+        status = TaskStatus()
+        status.header.stamp = (
+            self.get_clock().now().to_msg()
+        )
+        status.header.frame_id = 'patrol_map'
+        status.state = int(state)
+        status.task = 'entry_execution'
+        status.message = str(message)
+        status.progress = float(max(
+            0.0,
+            min(1.0, progress),
+        ))
+
+        self.status_pub.publish(status)
 
     @staticmethod
     def quaternion_to_yaw(quaternion) -> float:
