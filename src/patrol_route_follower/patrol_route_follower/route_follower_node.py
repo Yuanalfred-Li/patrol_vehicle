@@ -73,6 +73,10 @@ class PatrolRouteFollower(Node):
             1.0,
         )
         self.declare_parameter(
+            'maximum_entry_heading_error_deg',
+            180.0,
+        )
+        self.declare_parameter(
             'maximum_tracking_error',
             1.5,
         )
@@ -311,6 +315,38 @@ class PatrolRouteFollower(Node):
             )
             return response
 
+        segment_index = int(projection['segment'])
+        segment_start = self.points[segment_index]
+        segment_end = self.points[segment_index + 1]
+
+        route_heading = math.atan2(
+            segment_end['y'] - segment_start['y'],
+            segment_end['x'] - segment_start['x'],
+        )
+
+        vehicle_heading = self.quaternion_to_yaw(
+            self.latest_pose.pose.orientation
+        )
+
+        heading_error_deg = abs(math.degrees(
+            normalize_angle(vehicle_heading - route_heading)
+        ))
+
+        maximum_heading_error = abs(float(
+            self.get_parameter(
+                'maximum_entry_heading_error_deg'
+            ).value
+        ))
+
+        if heading_error_deg > maximum_heading_error:
+            response.success = False
+            response.message = (
+                f'entry heading error too large: '
+                f'{heading_error_deg:.1f}deg > '
+                f'{maximum_heading_error:.1f}deg'
+            )
+            return response
+
         self.progress_s = projection['s']
         self.progress_initialized = True
         self.enabled = True
@@ -320,7 +356,8 @@ class PatrolRouteFollower(Node):
             f'route follower enabled: '
             f'progress={self.progress_s:.2f}/'
             f'{self.total_length:.2f}m, '
-            f'path_error={path_error:.2f}m'
+            f'path_error={path_error:.2f}m, '
+            f'heading_error={heading_error_deg:.1f}deg'
         )
 
         self.get_logger().warning(response.message)
