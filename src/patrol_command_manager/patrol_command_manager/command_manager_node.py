@@ -153,8 +153,14 @@ class PatrolCommandManager(Node):
         self.mode = requested_mode
         self.mode_source = 'set_control_mode service'
 
-        # 切换模式时立即先发送停车命令，避免旧命令残留。
-        self.output_pub.publish(self.make_stop_command())
+        # 切换模式时清除旧速度命令。
+        # STOP 模式启用驻车；MANUAL/AUTO 保持驻车释放。
+        if self.mode == STOP:
+            self.output_pub.publish(self.make_stop_command())
+        else:
+            self.output_pub.publish(
+                self.make_motion_stop_command()
+            )
         self.publish_mode()
 
         response.success = True
@@ -181,7 +187,7 @@ class PatrolCommandManager(Node):
                 self.latest_manual is None
                 or now - self.manual_receive_time > timeout
             ):
-                output = self.make_stop_command()
+                output = self.make_motion_stop_command()
             else:
                 output = self.sanitize_command(
                     self.latest_manual
@@ -192,7 +198,7 @@ class PatrolCommandManager(Node):
                 self.latest_auto is None
                 or now - self.auto_receive_time > timeout
             ):
-                output = self.make_stop_command()
+                output = self.make_motion_stop_command()
             else:
                 output = self.sanitize_command(
                     self.latest_auto
@@ -273,6 +279,23 @@ class PatrolCommandManager(Node):
             command.target_speed_rpm = 0.0
             command.parking_brake = 0
             command.brake_light = True
+
+        return command
+
+    def make_motion_stop_command(self) -> VehicleCommand:
+        """停止运动，但保持驻车制动释放。"""
+        command = VehicleCommand()
+        command.header.stamp = self.get_clock().now().to_msg()
+
+        command.target_speed_rpm = 0.0
+        command.target_steering_angle_deg = 0.0
+        command.brake_pedal = 0
+
+        # 底盘协议：1=释放驻车，0=启用驻车。
+        command.parking_brake = 1
+        command.control_mode = 1
+        command.brake_light = True
+        command.emergency_stop = False
 
         return command
 

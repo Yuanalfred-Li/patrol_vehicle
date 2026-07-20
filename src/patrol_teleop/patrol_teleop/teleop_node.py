@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import os
 import select
 import sys
 import termios
@@ -32,8 +33,8 @@ class PatrolTeleop(Node):
         )
         self.declare_parameter('speed_rpm', 40.0)
         self.declare_parameter('steering_request', 250.0)
-        self.declare_parameter('publish_rate_hz', 20.0)
-        self.declare_parameter('key_timeout_sec', 0.30)
+        self.declare_parameter('publish_rate_hz', 100.0)
+        self.declare_parameter('key_timeout_sec', 0.10)
 
         command_topic = str(
             self.get_parameter('command_topic').value
@@ -42,7 +43,7 @@ class PatrolTeleop(Node):
             self.get_parameter('set_mode_service').value
         )
 
-        self.publisher = self.create_publisher(
+        self.command_pub = self.create_publisher(
             VehicleCommand,
             command_topic,
             20,
@@ -57,74 +58,34 @@ class PatrolTeleop(Node):
         self.last_key_time = 0.0
         self.exit_requested = False
 
-        publish_rate = float(
+        rate = float(
             self.get_parameter('publish_rate_hz').value
         )
-        if publish_rate <= 0.0:
-            publish_rate = 20.0
+        if rate <= 0.0:
+            rate = 100.0
 
         self.create_timer(
-            1.0 / publish_rate,
+            1.0 / rate,
             self.timer_callback,
         )
 
         self.get_logger().info(
-            'patrol_teleop started; '
-            f'output={command_topic}'
+            f'patrol_teleop started; output={command_topic}'
         )
 
-        self.print_help()
-
-    def activate_manual_mode(self) -> None:
+    def request_mode(self, mode: int):
         if not self.mode_client.wait_for_service(
             timeout_sec=5.0
         ):
             raise RuntimeError(
-                '/patrol/set_control_mode is unavailable; '
-                'start patrol_command_manager first'
+                '/patrol/set_control_mode 不可用，'
+                '请先启动 patrol_command_manager'
             )
-
-        response = self.request_mode(
-            MANUAL,
-            wait=True,
-        )
-
-        if response is None or not response.success:
-            message = (
-                'no response'
-                if response is None
-                else response.message
-            )
-            raise RuntimeError(
-                f'failed to enter MANUAL mode: {message}'
-            )
-
-        self.get_logger().warning(response.message)
-
-    def request_mode(
-        self,
-        mode: int,
-        wait: bool = False,
-    ):
-        if not self.mode_client.service_is_ready():
-            if not self.mode_client.wait_for_service(
-                timeout_sec=1.0
-            ):
-                self.get_logger().error(
-                    'control mode service unavailable'
-                )
-                return None
 
         request = SetControlMode.Request()
         request.mode = int(mode)
 
         future = self.mode_client.call_async(request)
-
-        if not wait:
-            future.add_done_callback(
-                self.mode_response_callback
-            )
-            return None
 
         rclpy.spin_until_future_complete(
             self,
@@ -135,33 +96,75 @@ class PatrolTeleop(Node):
         if not future.done():
             return None
 
-        try:
-            return future.result()
-        except Exception as exc:
-            self.get_logger().error(
-                f'control mode request failed: {exc}'
-            )
-            return None
+        return future.result()
 
-    def mode_response_callback(self, future) -> None:
-        try:
-            response = future.result()
-        except Exception as exc:
-            self.get_logger().error(
-                f'control mode request failed: {exc}'
-            )
-            return
+    def activate_manual_mode(self) -> None:
+        response = self.request_mode(MANUAL)
 
-        if response.success:
-            self.get_logger().warning(response.message)
-        else:
-            self.get_logger().error(response.message)
+        if response is None or not response.success:
+            message = (
+                '没有响应'
+                if response is None
+                else response.message
+            )
+            raise RuntimeError(
+                f'进入 MANUAL 模式失败：{message}'
+            )
+
+        self.get_logger().warning(response.message)
+
+    def read_key(self) -> Optional[str]:
+        """清空SSH终端中已积压的字符，只采用最新按键。"""
+        fd = sys.stdin.fileno()
+        latest_key = None
+
+        while True:
+            readable, _, _ = select.select(
+                [fd],
+                [],
+                [],
+                0.0,
+            )
+
+            if not readable:
+                break
+
+            data = os.read(fd, 4096)
+            if not data:
+                break
+
+            for character in data.decode(
+                errors='ignore'
+            ).lower():
+                if character in (
+                    '\x03', '.',
+                    'q', 'w', 'e',
+                    'a', 's', 'd',
+                    'z', 'x', 'c',
+                    ' ',
+                ):
+                    latest_key = character
+
+        return latest_key
 
     def timer_callback(self) -> None:
         key = self.read_key()
 
         if key is not None:
-            self.process_key(key)
+            if key in ('\x03', '.'):
+                self.current_key = None
+                self.exit_requested = True
+
+            elif key in ('s', ' '):
+                self.current_key = None
+
+            elif key in (
+                'q', 'w', 'e',
+                'a', 'd',
+                'z', 'x', 'c',
+            ):
+                self.current_key = key
+                self.last_key_time = time.monotonic()
 
         timeout = float(
             self.get_parameter('key_timeout_sec').value
@@ -173,50 +176,9 @@ class PatrolTeleop(Node):
         ):
             self.current_key = None
 
-        self.publisher.publish(
+        self.command_pub.publish(
             self.make_command(self.current_key)
         )
-
-    def read_key(self) -> Optional[str]:
-        readable, _, _ = select.select(
-            [sys.stdin],
-            [],
-            [],
-            0.0,
-        )
-
-        if not readable:
-            return None
-
-        return sys.stdin.read(1).lower()
-
-    def process_key(self, key: str) -> None:
-        if key in ('\x03', '.'):
-            self.current_key = None
-            self.exit_requested = True
-            return
-
-        if key == 'm':
-            self.current_key = None
-            self.request_mode(MANUAL)
-            return
-
-        if key == 'p':
-            self.current_key = None
-            self.request_mode(STOP)
-            return
-
-        if key in ('s', ' '):
-            self.current_key = None
-            return
-
-        if key in (
-            'q', 'w', 'e',
-            'a', 'd',
-            'z', 'x', 'c',
-        ):
-            self.current_key = key
-            self.last_key_time = time.monotonic()
 
     def make_command(
         self,
@@ -255,79 +217,74 @@ class PatrolTeleop(Node):
             target_speed = -speed
             target_steering = -steering
 
-        message = VehicleCommand()
-        message.header.stamp = self.get_clock().now().to_msg()
+        command = VehicleCommand()
+        command.header.stamp = (
+            self.get_clock().now().to_msg()
+        )
 
-        message.target_speed_rpm = float(target_speed)
-        message.target_steering_angle_deg = float(
+        command.target_speed_rpm = target_speed
+        command.target_steering_angle_deg = (
             target_steering
         )
+        command.brake_pedal = 0
+        command.parking_brake = 1
+        command.control_mode = 1
 
-        message.brake_pedal = 0
-        message.parking_brake = 1
-        message.control_mode = 1
-
-        message.left_turn_light = target_steering > 1.0
-        message.right_turn_light = target_steering < -1.0
-        message.brake_light = abs(target_speed) < 0.1
-
-        message.emergency_stop = False
-        message.headlamp = False
-        message.left_net_catch = False
-        message.right_net_catch = False
-        message.flash_light = False
-        message.net_launch_enable = False
-
-        return message
-
-    def stop_before_exit(self) -> None:
-        stop_command = self.make_command(None)
-
-        for _ in range(5):
-            stop_command.header.stamp = (
-                self.get_clock().now().to_msg()
-            )
-            self.publisher.publish(stop_command)
-            rclpy.spin_once(self, timeout_sec=0.02)
-            time.sleep(0.03)
-
-        response = self.request_mode(
-            STOP,
-            wait=True,
+        command.left_turn_light = (
+            target_steering > 1.0
+        )
+        command.right_turn_light = (
+            target_steering < -1.0
+        )
+        command.brake_light = (
+            abs(target_speed) < 0.1
         )
 
+        return command
+
+    def stop_before_exit(self) -> None:
+        stop = self.make_command(None)
+
+        for _ in range(5):
+            stop.header.stamp = (
+                self.get_clock().now().to_msg()
+            )
+            self.command_pub.publish(stop)
+            time.sleep(0.05)
+
+        response = self.request_mode(STOP)
         if response is not None:
-            self.get_logger().warning(response.message)
+            self.get_logger().warning(
+                response.message
+            )
 
     @staticmethod
     def print_help() -> None:
         print()
         print('========== 巡检小车键盘控制 ==========')
         print(' Q    W    E     左前 / 前进 / 右前')
-        print(' A    S    D     左转轮 / 停车 / 右转轮')
+        print(' A    S    D     左转 / 停车 / 右转')
         print(' Z    X    C     左后 / 后退 / 右后')
         print()
-        print(' M：切换到 MANUAL 模式')
-        print(' P：切换到 STOP 模式')
-        print(' 空格：停车')
-        print(' . 或 Ctrl+C：停车并退出')
+        print('空格：停车')
+        print('. 或 Ctrl+C：停车并退出')
         print('======================================')
         print()
 
 
 def main(args=None) -> None:
     rclpy.init(args=args)
-
     node = PatrolTeleop()
     terminal_settings = None
 
     try:
         if not sys.stdin.isatty():
             raise RuntimeError(
-                'patrol_teleop must run in an interactive terminal'
+                '必须在交互式 SSH 终端中运行'
             )
 
         node.activate_manual_mode()
+        node.print_help()
 
         terminal_settings = termios.tcgetattr(
             sys.stdin.fileno()
@@ -340,7 +297,7 @@ def main(args=None) -> None:
         ):
             rclpy.spin_once(
                 node,
-                timeout_sec=0.05,
+                timeout_sec=0.005,
             )
 
     except KeyboardInterrupt:
