@@ -40,7 +40,7 @@ class PatrolRouteFollower(Node):
         )
         self.declare_parameter(
             'command_topic',
-            '/patrol/auto_command',
+            '/patrol/route_command',
         )
         self.declare_parameter(
             'route_path_topic',

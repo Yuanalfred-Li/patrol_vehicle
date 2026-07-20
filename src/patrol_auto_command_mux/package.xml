@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>patrol_auto_command_mux</name>
+  <version>0.0.1</version>
+  <description>Automatic command multiplexer for patrol vehicle</description>
+
+  <maintainer email="nvidia@example.com">nvidia</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <depend>rclpy</depend>
+  <depend>patrol_interfaces</depend>
+  <depend>vehicle_can_msg</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
