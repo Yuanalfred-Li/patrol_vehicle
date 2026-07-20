@@ -84,7 +84,7 @@ class PatrolRouteFollower(Node):
             'maximum_tracking_error',
             1.5,
         )
-        self.declare_parameter('final_tolerance', 0.50)
+        self.declare_parameter('final_tolerance', 0.30)
         self.declare_parameter(
             'maximum_localization_age_sec',
             0.50,
