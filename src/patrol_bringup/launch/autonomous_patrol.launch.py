@@ -57,7 +57,9 @@ def launch_setup(context):
         'vehicle_command_topic'
     )
 
-    common_arguments = ['--ros-args']
+    record_route_file = LaunchConfiguration(
+        'record_route_file'
+    )
 
     nodes = [
         LogInfo(
@@ -85,6 +87,17 @@ def launch_setup(context):
                 'origin_latitude': origin_latitude,
                 'origin_longitude': origin_longitude,
                 'origin_altitude': origin_altitude,
+            }],
+        ),
+
+        Node(
+            package='patrol_route_recorder',
+            executable='route_recorder_node',
+            name='patrol_route_recorder',
+            output='screen',
+            emulate_tty=True,
+            parameters=[{
+                'route_file': record_route_file,
             }],
         ),
 
@@ -161,6 +174,15 @@ def generate_launch_description():
                 'routes/test_route.yaml'
             ),
             description='Recorded patrol route YAML file',
+        ),
+
+        DeclareLaunchArgument(
+            'record_route_file',
+            default_value=(
+                '/home/nvidia/patrol_ws/'
+                'routes/recorded_route.yaml'
+            ),
+            description='Output YAML file for route recording',
         ),
 
         DeclareLaunchArgument(
