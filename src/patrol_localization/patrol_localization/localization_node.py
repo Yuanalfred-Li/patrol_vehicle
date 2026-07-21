@@ -277,36 +277,6 @@ class PatrolLocalization(Node):
                     f'{gps.status.status}'
                 )
 
-            if origin_set and all(
-                math.isfinite(v) for v in values
-            ):
-                origin_lat = float(
-                    self.get_parameter(
-                        'origin_latitude'
-                    ).value
-                )
-                origin_lon = float(
-                    self.get_parameter(
-                        'origin_longitude'
-                    ).value
-                )
-                origin_alt = float(
-                    self.get_parameter(
-                        'origin_altitude'
-                    ).value
-                )
-
-                east, north, up = geodetic_to_enu(
-                    gps.latitude,
-                    gps.longitude,
-                    gps.altitude,
-                    origin_lat,
-                    origin_lon,
-                    origin_alt,
-                )
-
-                status.east = east
-                status.north = north
 
         if self.latest_imu is not None:
             imu = self.latest_imu
@@ -335,8 +305,76 @@ class PatrolLocalization(Node):
                     f'nsv2 too low: {imu.nsv2}'
                 )
 
+        if not reasons:
+            assert self.latest_gps is not None
+            assert self.latest_imu is not None
+
+            origin_lat = float(
+                self.get_parameter(
+                    'origin_latitude'
+                ).value
+            )
+            origin_lon = float(
+                self.get_parameter(
+                    'origin_longitude'
+                ).value
+            )
+            origin_alt = float(
+                self.get_parameter(
+                    'origin_altitude'
+                ).value
+            )
+
+            origin_values = (
+                origin_lat,
+                origin_lon,
+                origin_alt,
+            )
+
+            if not all(
+                math.isfinite(value)
+                for value in origin_values
+            ):
+                reasons.append(
+                    'origin contains non-finite value'
+                )
+            elif not -90.0 <= origin_lat <= 90.0:
+                reasons.append(
+                    'origin latitude out of range'
+                )
+            elif not -180.0 <= origin_lon <= 180.0:
+                reasons.append(
+                    'origin longitude out of range'
+                )
+            else:
+                east, north, up = geodetic_to_enu(
+                    self.latest_gps.latitude,
+                    self.latest_gps.longitude,
+                    self.latest_gps.altitude,
+                    origin_lat,
+                    origin_lon,
+                    origin_alt,
+                )
+
+                if not all(math.isfinite(value) for value in (
+                    east,
+                    north,
+                    up,
+                )):
+                    reasons.append(
+                        'ENU conversion produced '
+                        'non-finite value'
+                    )
+                else:
+                    status.east = east
+                    status.north = north
+
         status.valid = len(reasons) == 0
-        status.reason = 'OK' if status.valid else '; '.join(reasons)
+        status.reason = (
+            'OK'
+            if status.valid
+            else '; '.join(reasons)
+        )
         self.status_pub.publish(status)
 
         if not status.valid:
@@ -399,7 +437,8 @@ def main(args=None) -> None:
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

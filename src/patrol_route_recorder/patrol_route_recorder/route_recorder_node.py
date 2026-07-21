@@ -5,7 +5,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import rclpy
 import yaml
@@ -14,6 +14,102 @@ from nav_msgs.msg import Path as NavPath
 from patrol_interfaces.msg import LocalizationStatus
 from rclpy.node import Node
 from std_srvs.srv import Trigger
+
+
+WGS84_A = 6378137.0
+WGS84_E2 = 6.69437999014e-3
+
+
+def geodetic_to_ecef(
+    latitude_deg: float,
+    longitude_deg: float,
+    altitude: float,
+) -> Tuple[float, float, float]:
+    latitude = math.radians(latitude_deg)
+    longitude = math.radians(longitude_deg)
+
+    sin_latitude = math.sin(latitude)
+    cos_latitude = math.cos(latitude)
+    sin_longitude = math.sin(longitude)
+    cos_longitude = math.cos(longitude)
+
+    radius = WGS84_A / math.sqrt(
+        1.0
+        - WGS84_E2
+        * sin_latitude
+        * sin_latitude
+    )
+
+    x = (
+        radius + altitude
+    ) * cos_latitude * cos_longitude
+
+    y = (
+        radius + altitude
+    ) * cos_latitude * sin_longitude
+
+    z = (
+        radius * (1.0 - WGS84_E2)
+        + altitude
+    ) * sin_latitude
+
+    return x, y, z
+
+
+def geodetic_to_enu(
+    latitude_deg: float,
+    longitude_deg: float,
+    altitude: float,
+    origin_latitude_deg: float,
+    origin_longitude_deg: float,
+    origin_altitude: float,
+) -> Tuple[float, float, float]:
+    x, y, z = geodetic_to_ecef(
+        latitude_deg,
+        longitude_deg,
+        altitude,
+    )
+
+    origin_x, origin_y, origin_z = geodetic_to_ecef(
+        origin_latitude_deg,
+        origin_longitude_deg,
+        origin_altitude,
+    )
+
+    dx = x - origin_x
+    dy = y - origin_y
+    dz = z - origin_z
+
+    origin_latitude = math.radians(
+        origin_latitude_deg
+    )
+    origin_longitude = math.radians(
+        origin_longitude_deg
+    )
+
+    sin_latitude = math.sin(origin_latitude)
+    cos_latitude = math.cos(origin_latitude)
+    sin_longitude = math.sin(origin_longitude)
+    cos_longitude = math.cos(origin_longitude)
+
+    east = (
+        -sin_longitude * dx
+        + cos_longitude * dy
+    )
+
+    north = (
+        -sin_latitude * cos_longitude * dx
+        - sin_latitude * sin_longitude * dy
+        + cos_latitude * dz
+    )
+
+    up = (
+        cos_latitude * cos_longitude * dx
+        + cos_latitude * sin_longitude * dy
+        + sin_latitude * dz
+    )
+
+    return east, north, up
 
 
 class PatrolRouteRecorder(Node):
@@ -286,32 +382,117 @@ class PatrolRouteRecorder(Node):
         return response
 
     def save_route(self) -> None:
+        if not self.points:
+            raise ValueError(
+                'cannot save an empty route'
+            )
+
         self.route_file.parent.mkdir(
             parents=True,
             exist_ok=True,
         )
 
+        first_point = self.points[0]
+
+        origin_latitude = float(
+            first_point['latitude']
+        )
+        origin_longitude = float(
+            first_point['longitude']
+        )
+        origin_altitude = float(
+            first_point['altitude']
+        )
+
+        if not all(math.isfinite(value) for value in (
+            origin_latitude,
+            origin_longitude,
+            origin_altitude,
+        )):
+            raise ValueError(
+                'first waypoint has invalid '
+                'absolute coordinates'
+            )
+
+        if not -90.0 <= origin_latitude <= 90.0:
+            raise ValueError(
+                'origin latitude is out of range'
+            )
+
+        if not -180.0 <= origin_longitude <= 180.0:
+            raise ValueError(
+                'origin longitude is out of range'
+            )
+
+        converted_points = []
+        total_length = 0.0
+        previous_x = None
+        previous_y = None
+
+        for index, source_point in enumerate(
+            self.points
+        ):
+            latitude = float(
+                source_point['latitude']
+            )
+            longitude = float(
+                source_point['longitude']
+            )
+            altitude = float(
+                source_point['altitude']
+            )
+
+            if not all(math.isfinite(value) for value in (
+                latitude,
+                longitude,
+                altitude,
+            )):
+                raise ValueError(
+                    f'waypoint {index} has invalid '
+                    'absolute coordinates'
+                )
+
+            east, north, up = geodetic_to_enu(
+                latitude,
+                longitude,
+                altitude,
+                origin_latitude,
+                origin_longitude,
+                origin_altitude,
+            )
+
+            point = dict(source_point)
+            point['x'] = float(east)
+            point['y'] = float(north)
+            point['z'] = float(up)
+
+            converted_points.append(point)
+
+            if previous_x is not None:
+                total_length += math.hypot(
+                    east - previous_x,
+                    north - previous_y,
+                )
+
+            previous_x = east
+            previous_y = north
+
+        self.total_length = total_length
+
         data = {
-            'format_version': 1,
+            'format_version': 2,
             'frame_id': self.frame_id,
+            'coordinate_system': {
+                'geodetic': 'WGS84',
+                'local': 'ENU',
+                'origin_source': 'first_waypoint',
+            },
             'created_at': self.started_at,
             'saved_at': self.iso_time_now(),
             'origin': {
-                'latitude': float(
-                    self.get_parameter(
-                        'origin_latitude'
-                    ).value
-                ),
-                'longitude': float(
-                    self.get_parameter(
-                        'origin_longitude'
-                    ).value
-                ),
-                'altitude': float(
-                    self.get_parameter(
-                        'origin_altitude'
-                    ).value
-                ),
+                'latitude': origin_latitude,
+                'longitude': origin_longitude,
+                'altitude': origin_altitude,
             },
             'recording': {
                 'minimum_point_spacing': float(
@@ -321,10 +502,10 @@ class PatrolRouteRecorder(Node):
                 ),
             },
             'summary': {
-                'point_count': len(self.points),
-                'total_length': self.total_length,
+                'point_count': len(converted_points),
+                'total_length': total_length,
             },
-            'waypoints': self.points,
+            'waypoints': converted_points,
         }
 
         temporary_file = Path(
@@ -342,7 +523,10 @@ class PatrolRouteRecorder(Node):
                 sort_keys=False,
             )
 
-        os.replace(temporary_file, self.route_file)
+        os.replace(
+            temporary_file,
+            self.route_file,
+        )
 
     def publish_recorded_path(self) -> None:
         path = NavPath()
