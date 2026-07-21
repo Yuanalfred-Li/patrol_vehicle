@@ -270,11 +270,6 @@ def main(args=None) -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        if rclpy.ok():
-            for _ in range(5):
-                node.publish_stop()
-                time.sleep(0.03)
-
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
