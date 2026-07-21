@@ -24,6 +24,236 @@ def normalize_angle(angle: float) -> float:
     return math.atan2(math.sin(angle), math.cos(angle))
 
 
+WGS84_A = 6378137.0
+WGS84_E2 = 6.69437999014e-3
+
+
+def geodetic_to_ecef(
+    latitude_deg: float,
+    longitude_deg: float,
+    altitude: float,
+) -> Tuple[float, float, float]:
+    latitude = math.radians(latitude_deg)
+    longitude = math.radians(longitude_deg)
+
+    sin_latitude = math.sin(latitude)
+    cos_latitude = math.cos(latitude)
+    sin_longitude = math.sin(longitude)
+    cos_longitude = math.cos(longitude)
+
+    radius = WGS84_A / math.sqrt(
+        1.0 - WGS84_E2 * sin_latitude * sin_latitude
+    )
+
+    x = (
+        radius + altitude
+    ) * cos_latitude * cos_longitude
+
+    y = (
+        radius + altitude
+    ) * cos_latitude * sin_longitude
+
+    z = (
+        radius * (1.0 - WGS84_E2) + altitude
+    ) * sin_latitude
+
+    return x, y, z
+
+
+def geodetic_to_enu(
+    latitude_deg: float,
+    longitude_deg: float,
+    altitude: float,
+    origin_latitude_deg: float,
+    origin_longitude_deg: float,
+    origin_altitude: float,
+) -> Tuple[float, float, float]:
+    x, y, z = geodetic_to_ecef(
+        latitude_deg,
+        longitude_deg,
+        altitude,
+    )
+
+    origin_x, origin_y, origin_z = geodetic_to_ecef(
+        origin_latitude_deg,
+        origin_longitude_deg,
+        origin_altitude,
+    )
+
+    dx = x - origin_x
+    dy = y - origin_y
+    dz = z - origin_z
+
+    origin_latitude = math.radians(
+        origin_latitude_deg
+    )
+    origin_longitude = math.radians(
+        origin_longitude_deg
+    )
+
+    sin_latitude = math.sin(origin_latitude)
+    cos_latitude = math.cos(origin_latitude)
+    sin_longitude = math.sin(origin_longitude)
+    cos_longitude = math.cos(origin_longitude)
+
+    east = (
+        -sin_longitude * dx
+        + cos_longitude * dy
+    )
+
+    north = (
+        -sin_latitude * cos_longitude * dx
+        - sin_latitude * sin_longitude * dy
+        + cos_latitude * dz
+    )
+
+    up = (
+        cos_latitude * cos_longitude * dx
+        + cos_latitude * sin_longitude * dy
+        + sin_latitude * dz
+    )
+
+    return east, north, up
+
+
+def parse_route_origin(
+    data: Dict,
+) -> Optional[Tuple[float, float, float]]:
+    origin = data.get('origin')
+
+    if origin is None:
+        return None
+
+    if not isinstance(origin, dict):
+        raise ValueError(
+            'route origin must be a mapping'
+        )
+
+    try:
+        latitude = float(origin['latitude'])
+        longitude = float(origin['longitude'])
+        altitude = float(origin['altitude'])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f'invalid route origin: {exc}'
+        ) from exc
+
+    if not all(math.isfinite(value) for value in (
+        latitude,
+        longitude,
+        altitude,
+    )):
+        raise ValueError(
+            'route origin contains non-finite value'
+        )
+
+    if not -90.0 <= latitude <= 90.0:
+        raise ValueError(
+            'route origin latitude is out of range'
+        )
+
+    if not -180.0 <= longitude <= 180.0:
+        raise ValueError(
+            'route origin longitude is out of range'
+        )
+
+    return latitude, longitude, altitude
+
+
+def route_waypoint_to_local(
+    raw: Dict,
+    index: int,
+    origin: Optional[Tuple[float, float, float]],
+) -> Tuple[float, float, float]:
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f'waypoint {index} must be a mapping'
+        )
+
+    absolute_keys = (
+        'latitude',
+        'longitude',
+        'altitude',
+    )
+    absolute_count = sum(
+        key in raw for key in absolute_keys
+    )
+
+    if absolute_count:
+        if absolute_count != len(absolute_keys):
+            raise ValueError(
+                f'waypoint {index} has incomplete '
+                'absolute coordinates'
+            )
+
+        if origin is None:
+            raise ValueError(
+                f'waypoint {index} has absolute '
+                'coordinates but route origin is missing'
+            )
+
+        try:
+            latitude = float(raw['latitude'])
+            longitude = float(raw['longitude'])
+            altitude = float(raw['altitude'])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f'invalid absolute waypoint {index}: {exc}'
+            ) from exc
+
+        if not all(math.isfinite(value) for value in (
+            latitude,
+            longitude,
+            altitude,
+        )):
+            raise ValueError(
+                f'waypoint {index} contains '
+                'non-finite absolute coordinates'
+            )
+
+        if not -90.0 <= latitude <= 90.0:
+            raise ValueError(
+                f'waypoint {index} latitude '
+                'is out of range'
+            )
+
+        if not -180.0 <= longitude <= 180.0:
+            raise ValueError(
+                f'waypoint {index} longitude '
+                'is out of range'
+            )
+
+        return geodetic_to_enu(
+            latitude,
+            longitude,
+            altitude,
+            origin[0],
+            origin[1],
+            origin[2],
+        )
+
+    try:
+        x = float(raw['x'])
+        y = float(raw['y'])
+        z = float(raw.get('z', 0.0))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f'invalid local waypoint {index}: {exc}'
+        ) from exc
+
+    if not all(math.isfinite(value) for value in (
+        x,
+        y,
+        z,
+    )):
+        raise ValueError(
+            f'waypoint {index} contains '
+            'non-finite local coordinates'
+        )
+
+    return x, y, z
+
+
 class PatrolRouteFollower(Node):
 
     def __init__(self) -> None:
@@ -213,7 +443,8 @@ class PatrolRouteFollower(Node):
     def load_route(self) -> None:
         if not self.route_file.is_file():
             raise FileNotFoundError(
-                f'route file not found: {self.route_file}'
+                f'route file not found: '
+                f'{self.route_file}'
             )
 
         with self.route_file.open(
@@ -223,50 +454,51 @@ class PatrolRouteFollower(Node):
             data = yaml.safe_load(file)
 
         if not isinstance(data, dict):
-            raise ValueError('route YAML root must be a mapping')
+            raise ValueError(
+                'route YAML root must be a mapping'
+            )
 
         raw_points = data.get('waypoints')
+
         if not isinstance(raw_points, list):
-            raise ValueError('route has no waypoints list')
+            raise ValueError(
+                'route has no waypoints list'
+            )
 
         if len(raw_points) < 2:
             raise ValueError(
-                'route must contain at least two waypoints'
+                'route must contain at least '
+                'two waypoints'
             )
 
         self.frame_id = str(
             data.get('frame_id', 'patrol_map')
         )
 
+        origin = parse_route_origin(data)
         points = []
 
         for index, raw in enumerate(raw_points):
-            try:
-                x = float(raw['x'])
-                y = float(raw['y'])
-            except (KeyError, TypeError, ValueError) as exc:
-                raise ValueError(
-                    f'invalid waypoint {index}: {exc}'
-                ) from exc
-
-            if not math.isfinite(x) or not math.isfinite(y):
-                raise ValueError(
-                    f'waypoint {index} contains '
-                    'non-finite coordinates'
-                )
+            x, y, z = route_waypoint_to_local(
+                raw,
+                index,
+                origin,
+            )
 
             points.append({
                 'x': x,
                 'y': y,
-                'z': float(raw.get('z', 0.0)),
+                'z': z,
             })
 
         cumulative = [0.0]
 
         for index in range(len(points) - 1):
             length = math.hypot(
-                points[index + 1]['x'] - points[index]['x'],
-                points[index + 1]['y'] - points[index]['y'],
+                points[index + 1]['x']
+                - points[index]['x'],
+                points[index + 1]['y']
+                - points[index]['y'],
             )
 
             if length < 1.0e-6:
@@ -275,7 +507,9 @@ class PatrolRouteFollower(Node):
                     'has zero length'
                 )
 
-            cumulative.append(cumulative[-1] + length)
+            cumulative.append(
+                cumulative[-1] + length
+            )
 
         self.points = points
         self.cumulative_s = cumulative
