@@ -1,9 +1,14 @@
+
 build/
+.idea/
 install/
+*.log
 log/
-__pycache__/
+logs/
 *.pyc
+__pycache__/
 *.pyo
+routes/*.tmp
+routes/*.yaml.tmp
 *.swp
 .vscode/
-.idea/

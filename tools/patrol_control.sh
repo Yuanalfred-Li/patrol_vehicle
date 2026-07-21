@@ -2,9 +2,11 @@
 
 set -euo pipefail
 
+set +u
 source /opt/ros/humble/setup.bash
 source /home/nvidia/ros2_humble_main/install/setup.bash
 source /home/nvidia/patrol_ws/install/setup.bash
+set -u
 
 COMMAND="${1:-help}"
 
