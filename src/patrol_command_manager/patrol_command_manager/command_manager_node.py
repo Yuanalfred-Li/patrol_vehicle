@@ -359,15 +359,17 @@ def main(args=None) -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        # 退出前连续发送停车命令。
-        for _ in range(5):
-            node.output_pub.publish(
-                node.make_stop_command()
-            )
-            time.sleep(0.05)
+        if rclpy.ok():
+            # 退出前连续发送停车命令。
+            for _ in range(5):
+                node.output_pub.publish(
+                    node.make_stop_command()
+                )
+                time.sleep(0.05)
 
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

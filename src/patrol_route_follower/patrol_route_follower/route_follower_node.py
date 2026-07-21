@@ -862,12 +862,14 @@ def main(args=None) -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        for _ in range(5):
-            node.publish_stop()
-            time.sleep(0.03)
+        if rclpy.ok():
+            for _ in range(5):
+                node.publish_stop()
+                time.sleep(0.03)
 
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
