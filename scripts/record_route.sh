@@ -234,14 +234,27 @@ if ! ip -details link show can0 \
     exit 1
 fi
 
-if ! grep -q \
-    "can state ERROR-ACTIVE" \
-    "$RUN_DIR/can0_before_record.txt"; then
+CAN_STATE="$(
+    awk '/can state / {
+        print $3
+        exit
+    }' "$RUN_DIR/can0_before_record.txt"
+)"
 
-    echo "[patrol] can0 当前不是 ERROR-ACTIVE："
-    cat "$RUN_DIR/can0_before_record.txt"
-    exit 1
-fi
+case "$CAN_STATE" in
+    ERROR-ACTIVE)
+        echo "[patrol] can0：ERROR-ACTIVE"
+        ;;
+    ERROR-WARNING)
+        echo "[patrol] 警告：can0 当前为 ERROR-WARNING，临时允许继续录制。"
+        cat "$RUN_DIR/can0_before_record.txt"
+        ;;
+    *)
+        echo "[patrol] can0 状态不允许继续：${CAN_STATE:-UNKNOWN}"
+        cat "$RUN_DIR/can0_before_record.txt"
+        exit 1
+        ;;
+esac
 
 echo "[patrol] 请让车辆保持完全静止。"
 echo "[patrol] 等待有效 GNSS 后连续采样 5 秒..."

@@ -201,14 +201,27 @@ ip -details link show can0 \
     > "$RUN_DIR/can0.txt" \
     2>&1 || true
 
-if ! grep -q \
-    "can state ERROR-ACTIVE" \
-    "$RUN_DIR/can0.txt"; then
+CAN_STATE="$(
+    awk '/can state / {
+        print $3
+        exit
+    }' "$RUN_DIR/can0.txt"
+)"
 
-    echo "[patrol] can0 不是 ERROR-ACTIVE："
-    cat "$RUN_DIR/can0.txt"
-    exit 1
-fi
+case "$CAN_STATE" in
+    ERROR-ACTIVE)
+        echo "[patrol] can0：ERROR-ACTIVE"
+        ;;
+    ERROR-WARNING)
+        echo "[patrol] 警告：can0 当前为 ERROR-WARNING，临时允许低速复现。"
+        cat "$RUN_DIR/can0.txt"
+        ;;
+    *)
+        echo "[patrol] can0 状态不允许复现：${CAN_STATE:-UNKNOWN}"
+        cat "$RUN_DIR/can0.txt"
+        exit 1
+        ;;
+esac
 
 LAUNCH_PID=""
 KEEP_RUNNING=0
@@ -396,6 +409,54 @@ ros2 service call \
     "{mode: 0}" \
     > "$RUN_DIR/initial_stop.log" \
     2>&1 || true
+
+
+set_low_speed_parameter() {
+    local node_name="$1"
+    local parameter_name="$2"
+    local parameter_value="$3"
+    local result
+
+    result="$(
+        timeout 5 ros2 param set             "$node_name"             "$parameter_name"             "$parameter_value"             2>&1
+    )"
+
+    echo "$node_name $parameter_name=$parameter_value"
+    echo "$result"
+    echo "$node_name $parameter_name=$parameter_value: $result"         >> "$RUN_DIR/speed_parameters.log"
+
+    if ! grep -q         "Set parameter successful"         <<< "$result"; then
+
+        echo "[patrol] 低速参数设置失败，禁止开始复现。"
+        exit 1
+    fi
+}
+
+echo "[patrol] 设置低速复现参数..."
+
+set_low_speed_parameter     /patrol_entry_executor     forward_speed_rpm     15.0
+
+set_low_speed_parameter     /patrol_entry_executor     reverse_speed_rpm     10.0
+
+set_low_speed_parameter \
+    /patrol_route_follower \
+    minimum_speed_rpm \
+    12.0
+
+set_low_speed_parameter \
+    /patrol_route_follower \
+    max_speed_rpm \
+    20.0
+
+set_low_speed_parameter \
+    /patrol_route_follower \
+    lookahead_distance \
+    1.5
+
+echo "[patrol] 低速参数设置完成："
+echo "  入轨前进：15 RPM"
+echo "  入轨倒车：10 RPM"
+echo "  路线速度：12～20 RPM"
 
 echo
 echo "========================================"

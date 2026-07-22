@@ -12,3 +12,6 @@ routes/*.tmp
 routes/*.yaml.tmp
 *.swp
 .vscode/
+
+# Local script backups
+scripts/*.bak_*

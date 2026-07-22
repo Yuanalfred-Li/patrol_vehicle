@@ -118,14 +118,27 @@ ip -details link show can0 \
     > "$RUN_DIR/can0.txt" \
     2>&1 || true
 
-if ! grep -q \
-    "can state ERROR-ACTIVE" \
-    "$RUN_DIR/can0.txt"; then
+CAN_STATE="$(
+    awk '/can state / {
+        print $3
+        exit
+    }' "$RUN_DIR/can0.txt"
+)"
 
-    echo "[patrol] can0 不是 ERROR-ACTIVE："
-    cat "$RUN_DIR/can0.txt"
-    exit 1
-fi
+case "$CAN_STATE" in
+    ERROR-ACTIVE)
+        echo "[patrol] can0：ERROR-ACTIVE"
+        ;;
+    ERROR-WARNING)
+        echo "[patrol] 警告：can0 当前为 ERROR-WARNING，临时允许手动控制。"
+        cat "$RUN_DIR/can0.txt"
+        ;;
+    *)
+        echo "[patrol] can0 状态不允许手动控制：${CAN_STATE:-UNKNOWN}"
+        cat "$RUN_DIR/can0.txt"
+        exit 1
+        ;;
+esac
 
 echo "[patrol] 启动手动控制管理器..."
 
