@@ -27,9 +27,12 @@ case "$ROUTE_NAME" in
         ;;
 esac
 
+RAW_ROUTE_NAME="${ROUTE_NAME}_raw"
+RAW_ROUTE_FILE="$ROUTES_DIR/${RAW_ROUTE_NAME}.yaml"
 ROUTE_FILE="$ROUTES_DIR/${ROUTE_NAME}.yaml"
 RUN_DIR="$LOGS_DIR/record_$(date +%Y%m%d_%H%M%S)_${ROUTE_NAME}"
 ORIGIN_FILE="$RUN_DIR/stable_origin.yaml"
+ENDPOINT_FILE="$RUN_DIR/stable_endpoint.yaml"
 LAUNCH_LOG="$RUN_DIR/record_launch.log"
 
 mkdir -p "$ROUTES_DIR" "$RUN_DIR"
@@ -44,7 +47,9 @@ set -u
 LAUNCH_PID=""
 RECORDING_STARTED=0
 ORIGIN_READY=0
+ENDPOINT_READY=0
 FINALIZED=0
+SMOOTHED=0
 
 stop_mode() {
     if ros2 service list 2>/dev/null |
@@ -110,21 +115,72 @@ finalize_route() {
         return
     fi
 
-    if [ ! -s "$ROUTE_FILE" ]; then
+    if [ ! -s "$RAW_ROUTE_FILE" ]; then
         return
     fi
 
-    echo "[patrol] 使用稳定 origin 重新计算整条路线..."
+    echo "[patrol] 使用稳定起点和终点整理原始路线..."
+
+    local -a finalize_args=(
+        --route "$RAW_ROUTE_FILE"
+        --origin "$ORIGIN_FILE"
+    )
+
+    if [ -s "$ENDPOINT_FILE" ]; then
+        finalize_args+=(
+            --endpoint "$ENDPOINT_FILE"
+        )
+    fi
 
     if python3 "$TOOLS_DIR/finalize_recorded_route.py" \
-        --route "$ROUTE_FILE" \
-        --origin "$ORIGIN_FILE" |
+        "${finalize_args[@]}" |
         tee "$RUN_DIR/finalize_route.log"; then
 
         FINALIZED=1
     else
-        echo "[patrol] 警告：路线最终整理失败。"
-        echo "[patrol] 原始文件仍保留在：$ROUTE_FILE"
+        echo "[patrol] 警告：原始路线整理失败。"
+        echo "[patrol] 文件仍保留在："
+        echo "  $RAW_ROUTE_FILE"
+    fi
+}
+
+smooth_final_route() {
+    if [ "$FINALIZED" -ne 1 ]; then
+        return
+    fi
+
+    if [ "$ENDPOINT_READY" -ne 1 ]; then
+        echo "[patrol] 未获得稳定终点，仅保留原始路线："
+        echo "  $RAW_ROUTE_FILE"
+        return
+    fi
+
+    if [ "$SMOOTHED" -eq 1 ]; then
+        return
+    fi
+
+    if [ ! -s "$RAW_ROUTE_FILE" ]; then
+        return
+    fi
+
+    echo
+    echo "[patrol] 自动过滤并平滑路线..."
+
+    if "$WS/scripts/smooth_route.sh" \
+        "$RAW_ROUTE_NAME" \
+        "$ROUTE_NAME" |
+        tee "$RUN_DIR/smooth_route.log"; then
+
+        SMOOTHED=1
+
+        echo "[patrol] 正式路线生成成功："
+        echo "  $ROUTE_FILE"
+    else
+        echo "[patrol] 警告：路线平滑失败。"
+        echo "[patrol] 原始路线仍完整保留："
+        echo "  $RAW_ROUTE_FILE"
+
+        rm -f "$ROUTE_FILE"
     fi
 }
 
@@ -138,6 +194,7 @@ cleanup() {
     stop_recording
     stop_launch
     finalize_route
+    smooth_final_route
 
     exit "$exit_code"
 }
@@ -172,18 +229,33 @@ echo "========================================"
 echo "巡检路线录制"
 echo "========================================"
 echo "路线名称：$ROUTE_NAME"
-echo "输出文件：$ROUTE_FILE"
+echo "原始路线：$RAW_ROUTE_FILE"
+echo "正式路线：$ROUTE_FILE"
 echo "日志目录：$RUN_DIR"
 echo
 
-if [ -e "$ROUTE_FILE" ]; then
+if [ -e "$RAW_ROUTE_FILE" ] || \
+    [ -e "$ROUTE_FILE" ]; then
+
+    echo "[patrol] 检测到同名路线文件："
+
+    if [ -e "$RAW_ROUTE_FILE" ]; then
+        echo "  原始路线：$RAW_ROUTE_FILE"
+    fi
+
+    if [ -e "$ROUTE_FILE" ]; then
+        echo "  正式路线：$ROUTE_FILE"
+    fi
+
     read -r -p \
-        "路线已存在，是否覆盖？[y/N] " \
+        "是否同时覆盖原始路线和正式路线？[y/N] " \
         answer
 
     case "$answer" in
         y|Y|yes|YES)
-            rm -f "$ROUTE_FILE"
+            rm -f \
+                "$RAW_ROUTE_FILE" \
+                "$ROUTE_FILE"
             ;;
         *)
             echo "[patrol] 已取消。"
@@ -311,7 +383,7 @@ echo "[patrol] 启动定位、记录器和控制管理器..."
 setsid ros2 launch \
     patrol_bringup \
     record_patrol.launch.py \
-    route_file:="$ROUTE_FILE" \
+    route_file:="$RAW_ROUTE_FILE" \
     origin_latitude:="$ORIGIN_LATITUDE" \
     origin_longitude:="$ORIGIN_LONGITUDE" \
     origin_altitude:="$ORIGIN_ALTITUDE" \
@@ -471,21 +543,59 @@ echo
 echo "[patrol] 键盘控制已退出，立即停车..."
 
 stop_mode
-sleep 0.5
+sleep 1.0
 
 stop_recording
+
+echo
+echo "========================================"
+echo "终点稳定姿态采集"
+echo "========================================"
+echo "[patrol] 请保持车辆完全静止。"
+echo "[patrol] 2 秒后开始连续采样 5 秒..."
+echo
+
+sleep 2
+
+python3 "$TOOLS_DIR/estimate_route_origin.py" \
+    --output "$ENDPOINT_FILE" \
+    --duration 5.0 \
+    --maximum-wait 60.0 \
+    --minimum-samples 20 \
+    --minimum-nsv1 10 \
+    --minimum-nsv2 10 \
+    --maximum-horizontal-rms 0.80 \
+    --maximum-horizontal-error 2.00 \
+    --maximum-yaw-std 5.00 |
+    tee "$RUN_DIR/endpoint_estimation.log"
+
+ENDPOINT_READY=1
+
+echo
+echo "[patrol] 稳定终点采集完成。"
+
 stop_launch
 finalize_route
+smooth_final_route
 
 echo
 echo "========================================"
 echo "路线录制完成"
 echo "========================================"
-echo "路线文件：$ROUTE_FILE"
+echo "原始路线：$RAW_ROUTE_FILE"
+
+if [ -s "$ROUTE_FILE" ]; then
+    SUMMARY_ROUTE_FILE="$ROUTE_FILE"
+    echo "正式路线：$ROUTE_FILE"
+else
+    SUMMARY_ROUTE_FILE="$RAW_ROUTE_FILE"
+    echo "正式路线：未生成"
+fi
+
 echo "日志目录：$RUN_DIR"
 echo "键盘退出码：$TELEOP_RESULT"
 
-python3 - "$ROUTE_FILE" <<'PY'
+python3 - "$SUMMARY_ROUTE_FILE" <<'PY'
 import sys
 import yaml
 

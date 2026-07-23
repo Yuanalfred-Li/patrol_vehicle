@@ -15,3 +15,6 @@ routes/*.yaml.tmp
 
 # Local script backups
 scripts/*.bak_*
+tools/*.bak_*
+routes/*_auto.yaml
+routes/*_smooth.yaml

@@ -124,10 +124,22 @@ def main() -> None:
         required=True,
     )
 
+    parser.add_argument(
+        '--endpoint',
+        required=False,
+        default=None,
+    )
+
     arguments = parser.parse_args()
 
     route_path = Path(arguments.route)
     origin_path = Path(arguments.origin)
+
+    endpoint_path = (
+        Path(arguments.endpoint)
+        if arguments.endpoint
+        else None
+    )
 
     route_data = yaml.safe_load(
         route_path.read_text(encoding='utf-8')
@@ -137,6 +149,13 @@ def main() -> None:
         origin_path.read_text(encoding='utf-8')
     )
 
+    endpoint_data = None
+
+    if endpoint_path is not None:
+        endpoint_data = yaml.safe_load(
+            endpoint_path.read_text(encoding='utf-8')
+        )
+
     if not isinstance(route_data, dict):
         raise RuntimeError(
             'route YAML root must be a mapping'
@@ -145,6 +164,14 @@ def main() -> None:
     if not isinstance(origin_data, dict):
         raise RuntimeError(
             'origin YAML root must be a mapping'
+        )
+
+    if (
+        endpoint_data is not None
+        and not isinstance(endpoint_data, dict)
+    ):
+        raise RuntimeError(
+            'endpoint YAML root must be a mapping'
         )
 
     origin = origin_data['origin']
@@ -234,6 +261,51 @@ def main() -> None:
         origin_data.get('estimation', {})
     )
 
+    if endpoint_data is not None:
+        endpoint = endpoint_data['origin']
+
+        endpoint_latitude = float(
+            endpoint['latitude']
+        )
+        endpoint_longitude = float(
+            endpoint['longitude']
+        )
+        endpoint_altitude = float(
+            endpoint['altitude']
+        )
+        endpoint_yaw_deg = float(
+            endpoint['yaw_deg']
+        )
+
+        endpoint_east, endpoint_north, endpoint_up = (
+            geodetic_to_enu(
+                endpoint_latitude,
+                endpoint_longitude,
+                endpoint_altitude,
+                origin_latitude,
+                origin_longitude,
+                origin_altitude,
+            )
+        )
+
+        route_data['end_pose'] = {
+            'latitude': endpoint_latitude,
+            'longitude': endpoint_longitude,
+            'altitude': endpoint_altitude,
+            'yaw_deg': endpoint_yaw_deg,
+            'x': endpoint_east,
+            'y': endpoint_north,
+            'z': endpoint_up,
+        }
+
+        route_data['end_pose_estimation'] = (
+            endpoint_data.get('estimation', {})
+        )
+
+        route_data['coordinate_system'][
+            'endpoint_source'
+        ] = 'stable_post_record_average'
+
     summary = route_data.setdefault(
         'summary',
         {},
@@ -266,6 +338,23 @@ def main() -> None:
         f'{origin_altitude:.4f}'
     )
     print(f'ORIGIN_YAW_DEG={origin_yaw_deg:.4f}')
+
+    if endpoint_data is not None:
+        print(
+            f'ENDPOINT={endpoint_latitude:.10f},'
+            f'{endpoint_longitude:.10f},'
+            f'{endpoint_altitude:.4f}'
+        )
+        print(
+            f'ENDPOINT_YAW_DEG='
+            f'{endpoint_yaw_deg:.4f}'
+        )
+        print(
+            f'ENDPOINT_ENU='
+            f'{endpoint_east:.3f},'
+            f'{endpoint_north:.3f},'
+            f'{endpoint_up:.3f}'
+        )
 
 
 if __name__ == '__main__':
