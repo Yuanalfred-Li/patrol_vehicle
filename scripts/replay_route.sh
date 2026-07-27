@@ -441,22 +441,22 @@ set_low_speed_parameter     /patrol_entry_executor     reverse_speed_rpm     10.
 set_low_speed_parameter \
     /patrol_route_follower \
     minimum_speed_rpm \
-    12.0
+    10.0
 
 set_low_speed_parameter \
     /patrol_route_follower \
     max_speed_rpm \
-    20.0
+    15.0
 
 set_low_speed_parameter \
     /patrol_route_follower \
     lookahead_distance \
-    1.5
+    1.0
 
 echo "[patrol] 低速参数设置完成："
 echo "  入轨前进：15 RPM"
 echo "  入轨倒车：10 RPM"
-echo "  路线速度：12～20 RPM"
+echo "  路线速度：10～15 RPM"
 
 echo
 echo "========================================"
