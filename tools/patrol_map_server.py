@@ -1823,30 +1823,31 @@ input[type="checkbox"] {{
   border-radius: 2px;
 }}
 .vehicle-icon {{
-  width: 28px;
-  height: 36px;
+  width: 12px;
+  height: 15px;
   transform-origin: 50% 50%;
+  cursor: pointer;
 }}
 .vehicle-body {{
   position: relative;
-  width: 24px;
-  height: 28px;
-  margin: 6px 2px 2px;
-  border: 2px solid #ffffff;
-  border-radius: 7px;
+  width: 10px;
+  height: 11px;
+  margin: 3px 1px 1px;
+  border: 1px solid #ffffff;
+  border-radius: 3px;
   background: #1677ff;
   box-shadow: 0 1px 6px rgba(0,0,0,.45);
 }}
 .vehicle-body::before {{
   content: "";
   position: absolute;
-  left: 6px;
-  top: -9px;
+  left: 2px;
+  top: -4px;
   width: 0;
   height: 0;
-  border-left: 6px solid transparent;
-  border-right: 6px solid transparent;
-  border-bottom: 10px solid #1677ff;
+  border-left: 3px solid transparent;
+  border-right: 3px solid transparent;
+  border-bottom: 5px solid #1677ff;
 }}
 .small {{
   color: #666666;
@@ -2183,12 +2184,49 @@ function setVehicleMarker(position, heading) {{
     vehicleMarker = new AMap.Marker({{
       position: position,
       content: vehicleContent(heading),
-      offset: new AMap.Pixel(-14, -18),
+      offset: new AMap.Pixel(-6, -8),
       zIndex: 100,
       title: "巡检小车"
     }});
 
     map.add(vehicleMarker);
+
+    vehicleMarker.on("click", function() {{
+      if (!drawing || !vehicleGcj) {{
+        return;
+      }}
+
+      const longitude = Number(
+        vehicleGcj.lng !== undefined
+          ? vehicleGcj.lng
+          : vehicleGcj[0]
+      );
+      const latitude = Number(
+        vehicleGcj.lat !== undefined
+          ? vehicleGcj.lat
+          : vehicleGcj[1]
+      );
+
+      if (
+        !Number.isFinite(longitude)
+        || !Number.isFinite(latitude)
+      ) {{
+        showError("当前车辆位置无效，无法添加关键点。");
+        return;
+      }}
+
+      keypointsGcj.push([
+        longitude,
+        latitude
+      ]);
+
+      updateDesignPreview();
+
+      document.getElementById(
+        "design-status"
+      ).textContent +=
+        "\\n已添加车辆当前位置作为关键点。";
+    }});
   }} else {{
     vehicleMarker.setPosition(position);
     vehicleMarker.setContent(
