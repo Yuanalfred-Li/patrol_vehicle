@@ -433,6 +433,43 @@ def gcj02_to_wgs84_exact(
     return result_longitude, result_latitude
 
 
+def points_wgs84_to_gcj02(
+    points: Iterable[Iterable[float]],
+) -> list[list[float]]:
+    result = []
+
+    for index, point in enumerate(points):
+        values = list(point)
+
+        if len(values) < 2:
+            raise ValueError(
+                f"WGS84 点 {index} 坐标不足"
+            )
+
+        longitude = finite_float(
+            values[0],
+            f"WGS84 点 {index} 经度",
+        )
+        latitude = finite_float(
+            values[1],
+            f"WGS84 点 {index} 纬度",
+        )
+
+        converted_longitude, converted_latitude = (
+            wgs84_to_gcj02(
+                longitude,
+                latitude,
+            )
+        )
+
+        result.append([
+            converted_longitude,
+            converted_latitude,
+        ])
+
+    return result
+
+
 def remove_duplicate_points(
     points: list[tuple[float, float]],
     minimum_distance: float,
@@ -981,13 +1018,32 @@ class SharedState:
         self,
         message: LocalizationStatus,
     ) -> None:
+        latitude = float(message.latitude)
+        longitude = float(message.longitude)
+
+        if (
+            math.isfinite(longitude)
+            and math.isfinite(latitude)
+        ):
+            longitude_gcj02, latitude_gcj02 = (
+                wgs84_to_gcj02(
+                    longitude,
+                    latitude,
+                )
+            )
+        else:
+            longitude_gcj02 = math.nan
+            latitude_gcj02 = math.nan
+
         payload = {
             "valid": bool(message.valid),
             "gps_status": int(message.gps_status),
             "nsv1": int(message.nsv1),
             "nsv2": int(message.nsv2),
-            "latitude": float(message.latitude),
-            "longitude": float(message.longitude),
+            "latitude": latitude,
+            "longitude": longitude,
+            "latitude_gcj02": latitude_gcj02,
+            "longitude_gcj02": longitude_gcj02,
             "altitude": float(message.altitude),
             "east": float(message.east),
             "north": float(message.north),
@@ -1076,10 +1132,13 @@ class SharedState:
     ) -> dict[str, Any]:
         with self.lock:
             if epoch != self.trace_epoch:
+                points = list(self.trace)
+
                 return {
                     "epoch": self.trace_epoch,
                     "start_index": 0,
-                    "points": list(self.trace),
+                    "points_gcj02":
+                        points_wgs84_to_gcj02(points),
                 }
 
             start = max(
@@ -1087,10 +1146,13 @@ class SharedState:
                 min(index, len(self.trace)),
             )
 
+            points = list(self.trace[start:])
+
             return {
                 "epoch": self.trace_epoch,
                 "start_index": start,
-                "points": list(self.trace[start:]),
+                "points_gcj02":
+                    points_wgs84_to_gcj02(points),
             }
 
     def clear_trace(self) -> None:
@@ -1236,6 +1298,40 @@ class RouteStore:
         if not isinstance(data, dict):
             raise ValueError("路线 YAML 根节点无效")
 
+        origin = data.get("origin")
+
+        if not isinstance(origin, dict):
+            raise ValueError("路线缺少 origin")
+
+        origin_latitude = finite_float(
+            origin.get("latitude"),
+            "origin.latitude",
+        )
+        origin_longitude = finite_float(
+            origin.get("longitude"),
+            "origin.longitude",
+        )
+        origin_altitude = finite_float(
+            origin.get("altitude", 0.0),
+            "origin.altitude",
+        )
+
+        origin_yaw = origin.get("yaw_deg")
+
+        if origin_yaw is not None:
+            origin_yaw = finite_float(
+                origin_yaw,
+                "origin.yaw_deg",
+            )
+
+        (
+            origin_longitude_gcj02,
+            origin_latitude_gcj02,
+        ) = wgs84_to_gcj02(
+            origin_longitude,
+            origin_latitude,
+        )
+
         waypoints = data.get("waypoints")
 
         if not isinstance(waypoints, list):
@@ -1269,7 +1365,19 @@ class RouteStore:
                 ).get("closed_loop", False)
             ),
             "summary": data.get("summary", {}),
+            "origin_wgs84": {
+                "latitude": origin_latitude,
+                "longitude": origin_longitude,
+                "altitude": origin_altitude,
+                "yaw_deg": origin_yaw,
+            },
+            "origin_gcj02": {
+                "latitude": origin_latitude_gcj02,
+                "longitude": origin_longitude_gcj02,
+            },
             "points_wgs84": points,
+            "points_gcj02":
+                points_wgs84_to_gcj02(points),
         }
 
     def save_route(
@@ -1415,6 +1523,16 @@ class RouteStore:
         )
         radius_p05 = percentile(radii, 0.05)
 
+        preview_wgs84 = self.points_to_wgs84(
+            route_points,
+            origin_latitude,
+            origin_longitude,
+            altitude,
+        )
+        preview_gcj02 = points_wgs84_to_gcj02(
+            preview_wgs84
+        )
+
         warnings = []
 
         if intersections:
@@ -1444,12 +1562,8 @@ class RouteStore:
                 "success": False,
                 "requires_confirmation": True,
                 "warnings": warnings,
-                "preview_wgs84": self.points_to_wgs84(
-                    route_points,
-                    origin_latitude,
-                    origin_longitude,
-                    altitude,
-                ),
+                "preview_wgs84": preview_wgs84,
+                "preview_gcj02": preview_gcj02,
                 "statistics": {
                     "point_count": len(route_points),
                     "total_length_m": polyline_length(
@@ -1587,13 +1701,8 @@ class RouteStore:
             "name": route_name,
             "path": str(path),
             "warnings": warnings,
-            "preview_wgs84": [
-                [
-                    point["longitude"],
-                    point["latitude"],
-                ]
-                for point in waypoints
-            ],
+            "preview_wgs84": preview_wgs84,
+            "preview_gcj02": preview_gcj02,
             "statistics": {
                 "point_count": len(waypoints),
                 "total_length_m": total_length,
@@ -2120,52 +2229,8 @@ function showError(message) {{
   element.textContent = String(message);
 }}
 
-function convertBatch(points) {{
-  return new Promise((resolve, reject) => {{
-    if (!points.length) {{
-      resolve([]);
-      return;
-    }}
-
-    AMap.convertFrom(
-      points,
-      "gps",
-      function(status, result) {{
-        if (
-          status === "complete"
-          && result
-          && Array.isArray(result.locations)
-        ) {{
-          resolve(
-            result.locations.map(
-              point => [point.lng, point.lat]
-            )
-          );
-          return;
-        }}
-
-        reject(
-          new Error(
-            "WGS84→高德坐标转换失败："
-            + status
-          )
-        );
-      }}
-    );
-  }});
-}}
-
-async function convertAll(points) {{
-  const converted = [];
-
-  for (let start = 0; start < points.length; start += 40) {{
-    const batch = points.slice(start, start + 40);
-    const result = await convertBatch(batch);
-    converted.push(...result);
-  }}
-
-  return converted;
-}}
+// 坐标转换统一由 Python 后端完成。
+// 前端收到的车辆、轨迹和路线坐标均为 GCJ-02。
 
 function vehicleContent(heading) {{
   return (
@@ -2274,16 +2339,14 @@ async function updateState() {{
         + "\\n原因：" + localization.reason;
 
       if (
-        Number.isFinite(localization.longitude)
-        && Number.isFinite(localization.latitude)
+        Number.isFinite(localization.longitude_gcj02)
+        && Number.isFinite(localization.latitude_gcj02)
       ) {{
-        const converted = await convertBatch([[
-          localization.longitude,
-          localization.latitude
-        ]]);
-
         setVehicleMarker(
-          converted[0],
+          [
+            localization.longitude_gcj02,
+            localization.latitude_gcj02
+          ],
           localization.heading_deg
         );
       }}
@@ -2340,12 +2403,12 @@ async function updateTrace(count, epoch) {{
     actualTraceGcj = [];
   }}
 
-  const converted = await convertAll(
-    data.points
-  );
+  const points = Array.isArray(
+    data.points_gcj02
+  ) ? data.points_gcj02 : [];
 
-  actualTraceGcj.push(...converted);
-  traceIndex = data.start_index + data.points.length;
+  actualTraceGcj.push(...points);
+  traceIndex = data.start_index + points.length;
 
   actualTracePolyline.setPath(
     actualTraceGcj
@@ -2791,35 +2854,26 @@ async function saveRoute(allowWarnings) {{
       );
     }}
 
-    if (result.preview_wgs84) {{
-      try {{
-        const step = Math.max(
-          1,
-          Math.ceil(result.preview_wgs84.length / 240)
-        );
+    if (Array.isArray(result.preview_gcj02)) {{
+      const step = Math.max(
+        1,
+        Math.ceil(result.preview_gcj02.length / 240)
+      );
 
-        const previewPoints = result.preview_wgs84.filter(
-          (_, index) => index % step === 0
-        );
+      const previewPoints = result.preview_gcj02.filter(
+        (_, index) => index % step === 0
+      );
 
-        const lastPoint =
-          result.preview_wgs84[
-            result.preview_wgs84.length - 1
-          ];
+      const lastPoint =
+        result.preview_gcj02[
+          result.preview_gcj02.length - 1
+        ];
 
-        if (previewPoints.length && lastPoint) {{
-          previewPoints.push(lastPoint);
-        }}
-
-        plannedPolyline.setPath(
-          await convertAll(previewPoints)
-        );
-      }} catch (previewError) {{
-        console.warn(
-          "路线已保存，但高德预览转换失败：",
-          previewError
-        );
+      if (previewPoints.length && lastPoint) {{
+        previewPoints.push(lastPoint);
       }}
+
+      plannedPolyline.setPath(previewPoints);
     }}
 
     if (
@@ -2925,27 +2979,23 @@ async function loadSelectedRoute() {{
 
     const step = Math.max(
       1,
-      Math.ceil(route.points_wgs84.length / 240)
+      Math.ceil(route.points_gcj02.length / 240)
     );
 
-    const displayPoints = route.points_wgs84.filter(
+    const displayPoints = route.points_gcj02.filter(
       (_, index) => index % step === 0
     );
 
     const lastPoint =
-      route.points_wgs84[
-        route.points_wgs84.length - 1
+      route.points_gcj02[
+        route.points_gcj02.length - 1
       ];
 
     if (displayPoints.length && lastPoint) {{
       displayPoints.push(lastPoint);
     }}
 
-    const converted = await convertAll(
-      displayPoints
-    );
-
-    plannedPolyline.setPath(converted);
+    plannedPolyline.setPath(displayPoints);
 
     document.getElementById(
       "saved-route-info"
@@ -2957,6 +3007,14 @@ async function loadSelectedRoute() {{
       + " m"
       + "\\n闭环："
       + (route.closed_loop ? "是" : "否")
+      + "\\n原点经度："
+      + Number(
+        route.origin_wgs84.longitude
+      ).toFixed(9)
+      + "\\n原点纬度："
+      + Number(
+        route.origin_wgs84.latitude
+      ).toFixed(9)
       + "\\n复现命令：./scripts/replay_route.sh "
       + route.name;
 
