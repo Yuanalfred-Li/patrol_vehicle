@@ -38,6 +38,7 @@ import math
 import os
 import re
 import signal
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
@@ -49,7 +50,9 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import rclpy
 import yaml
+from msg_out.msg import ImuStatus
 from patrol_interfaces.msg import LocalizationStatus, TaskStatus
+from sensor_msgs.msg import NavSatFix
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 
@@ -1008,6 +1011,8 @@ class SharedState:
         default_factory=threading.Lock
     )
     localization: Optional[dict[str, Any]] = None
+    gps: Optional[dict[str, Any]] = None
+    imu: Optional[dict[str, Any]] = None
     mission: Optional[dict[str, Any]] = None
     trace: list[list[float]] = field(
         default_factory=list
@@ -1094,6 +1099,174 @@ class SharedState:
                     del self.trace[:remove_count]
                     self.trace_epoch += 1
 
+    def update_gps(
+        self,
+        message: NavSatFix,
+    ) -> None:
+        latitude = float(message.latitude)
+        longitude = float(message.longitude)
+        altitude = float(message.altitude)
+
+        if (
+            math.isfinite(longitude)
+            and math.isfinite(latitude)
+        ):
+            longitude_gcj02, latitude_gcj02 = (
+                wgs84_to_gcj02(
+                    longitude,
+                    latitude,
+                )
+            )
+        else:
+            longitude_gcj02 = math.nan
+            latitude_gcj02 = math.nan
+
+        payload = {
+            "gps_status": int(message.status.status),
+            "latitude": latitude,
+            "longitude": longitude,
+            "altitude": altitude,
+            "latitude_gcj02": latitude_gcj02,
+            "longitude_gcj02": longitude_gcj02,
+            "received_at": time.time(),
+        }
+
+        with self.lock:
+            self.gps = payload
+
+            if not (
+                math.isfinite(longitude)
+                and math.isfinite(latitude)
+            ):
+                return
+
+            point = [longitude, latitude]
+            should_append = not self.trace
+
+            if self.trace:
+                should_append = (
+                    horizontal_distance_wgs84(
+                        (
+                            self.trace[-1][0],
+                            self.trace[-1][1],
+                        ),
+                        (longitude, latitude),
+                    )
+                    >= self.trace_spacing_m
+                )
+
+            if should_append:
+                self.trace.append(point)
+
+                if len(self.trace) > self.trace_max_points:
+                    remove_count = (
+                        len(self.trace)
+                        - self.trace_max_points
+                    )
+                    del self.trace[:remove_count]
+                    self.trace_epoch += 1
+
+    def update_imu(
+        self,
+        message: ImuStatus,
+    ) -> None:
+        with self.lock:
+            self.imu = {
+                "nsv1": int(message.nsv1),
+                "nsv2": int(message.nsv2),
+                "heading_deg": float(message.yaw),
+                "received_at": time.time(),
+            }
+
+    def navigation_fix_locked(
+        self,
+    ) -> Optional[dict[str, Any]]:
+        if self.gps is None or self.imu is None:
+            return None
+
+        now = time.time()
+        gps_age = now - float(
+            self.gps["received_at"]
+        )
+        imu_age = now - float(
+            self.imu["received_at"]
+        )
+
+        values = (
+            self.gps["longitude"],
+            self.gps["latitude"],
+            self.imu["heading_deg"],
+        )
+
+        finite = all(
+            math.isfinite(float(value))
+            for value in values
+        )
+
+        fresh = gps_age <= 2.0 and imu_age <= 2.0
+        satellites_ok = (
+            int(self.imu["nsv1"]) >= 10
+            and int(self.imu["nsv2"]) >= 10
+        )
+
+        valid = finite and fresh and satellites_ok
+
+        reasons = []
+
+        if not finite:
+            reasons.append("GPS/航向包含无效数值")
+        if gps_age > 2.0:
+            reasons.append(
+                f"GPS数据超时：{gps_age:.1f}s"
+            )
+        if imu_age > 2.0:
+            reasons.append(
+                f"IMU数据超时：{imu_age:.1f}s"
+            )
+        if not satellites_ok:
+            reasons.append(
+                "卫星数不足："
+                f'{self.imu["nsv1"]}/'
+                f'{self.imu["nsv2"]}'
+            )
+
+        return {
+            "valid": valid,
+            "source": "raw_gps_imu",
+            "gps_status": int(
+                self.gps["gps_status"]
+            ),
+            "nsv1": int(self.imu["nsv1"]),
+            "nsv2": int(self.imu["nsv2"]),
+            "latitude": float(
+                self.gps["latitude"]
+            ),
+            "longitude": float(
+                self.gps["longitude"]
+            ),
+            "altitude": float(
+                self.gps["altitude"]
+            ),
+            "latitude_gcj02": float(
+                self.gps["latitude_gcj02"]
+            ),
+            "longitude_gcj02": float(
+                self.gps["longitude_gcj02"]
+            ),
+            "heading_deg": float(
+                self.imu["heading_deg"]
+            ),
+            "reason": (
+                "OK"
+                if valid
+                else "；".join(reasons)
+            ),
+            "received_at": max(
+                float(self.gps["received_at"]),
+                float(self.imu["received_at"]),
+            ),
+        }
+
     def update_mission(
         self,
         message: TaskStatus,
@@ -1110,6 +1283,8 @@ class SharedState:
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             return {
+                "navigation_fix":
+                    self.navigation_fix_locked(),
                 "localization": (
                     dict(self.localization)
                     if self.localization is not None
@@ -1186,6 +1361,20 @@ class PatrolMapBridge(Node):
         self.shared_state = shared_state
 
         self.create_subscription(
+            NavSatFix,
+            "/gps/data",
+            self.gps_callback,
+            20,
+        )
+
+        self.create_subscription(
+            ImuStatus,
+            "/imu/status",
+            self.imu_callback,
+            20,
+        )
+
+        self.create_subscription(
             LocalizationStatus,
             "/patrol/localization_status",
             self.localization_callback,
@@ -1203,6 +1392,18 @@ class PatrolMapBridge(Node):
             "patrol map bridge ready; "
             "read-only visualization and route saving"
         )
+
+    def gps_callback(
+        self,
+        message: NavSatFix,
+    ) -> None:
+        self.shared_state.update_gps(message)
+
+    def imu_callback(
+        self,
+        message: ImuStatus,
+    ) -> None:
+        self.shared_state.update_imu(message)
 
     def localization_callback(
         self,
@@ -1374,6 +1575,20 @@ class RouteStore:
             "origin_gcj02": {
                 "latitude": origin_latitude_gcj02,
                 "longitude": origin_longitude_gcj02,
+            },
+            "end_wgs84": {
+                "longitude": points[-1][0],
+                "latitude": points[-1][1],
+            },
+            "end_gcj02": {
+                "longitude": wgs84_to_gcj02(
+                    points[-1][0],
+                    points[-1][1],
+                )[0],
+                "latitude": wgs84_to_gcj02(
+                    points[-1][0],
+                    points[-1][1],
+                )[1],
             },
             "points_wgs84": points,
             "points_gcj02":
@@ -1958,6 +2173,36 @@ input[type="checkbox"] {{
   border-right: 3px solid transparent;
   border-bottom: 5px solid #1677ff;
 }}
+.origin-icon {{
+  width: 22px;
+  height: 22px;
+  box-sizing: border-box;
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  background: #fa8c16;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  box-shadow: 0 1px 6px rgba(0,0,0,.45);
+}}
+
+.end-icon {{
+  width: 22px;
+  height: 22px;
+  box-sizing: border-box;
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  background: #f5222d;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  box-shadow: 0 1px 6px rgba(0,0,0,.45);
+}}
+
 .small {{
   color: #666666;
   font-size: 12px;
@@ -2102,6 +2347,26 @@ window._AMapSecurityConfig = {{
       <button onclick="loadSelectedRoute()">显示路线</button>
     </div>
 
+    <div>
+      <button
+        id="start-replay-button"
+        onclick="startSelectedRoute()"
+      >
+        开始巡迹
+      </button>
+      <button onclick="stopReplay()">
+        停止巡迹
+      </button>
+    </div>
+
+    <div id="replay-status" class="card">
+      巡迹控制：待命
+    </div>
+
+    <div id="route-origin-distance" class="card warn">
+      尚未加载路线原点
+    </div>
+
     <div id="saved-route-info" class="card">
       保存后仍使用现有命令复现：<br>
       <code>./scripts/replay_route.sh 路线名</code><br><br>
@@ -2146,6 +2411,10 @@ map.setLayers([
 
 let vehicleMarker = null;
 let vehicleGcj = null;
+let latestNavigationFix = null;
+let routeOriginMarker = null;
+let routeEndMarker = null;
+let selectedRouteData = null;
 let followVehicleEnabled = true;
 let firstVehicleFix = true;
 
@@ -2232,6 +2501,152 @@ function showError(message) {{
 // 坐标转换统一由 Python 后端完成。
 // 前端收到的车辆、轨迹和路线坐标均为 GCJ-02。
 
+function distanceWgs84(
+  firstLongitude,
+  firstLatitude,
+  secondLongitude,
+  secondLatitude
+) {{
+  const latitude0 =
+    0.5 * (firstLatitude + secondLatitude)
+    * Math.PI / 180.0;
+
+  const dx =
+    6378137.0
+    * Math.cos(latitude0)
+    * (secondLongitude - firstLongitude)
+    * Math.PI / 180.0;
+
+  const dy =
+    6378137.0
+    * (secondLatitude - firstLatitude)
+    * Math.PI / 180.0;
+
+  return Math.hypot(dx, dy);
+}}
+
+function updateRouteOriginDistance() {{
+  const element = document.getElementById(
+    "route-origin-distance"
+  );
+
+  if (
+    !selectedRouteData
+    || !selectedRouteData.origin_wgs84
+  ) {{
+    element.className = "card warn";
+    element.textContent = "尚未加载路线原点";
+    return;
+  }}
+
+  if (!latestNavigationFix) {{
+    element.className = "card warn";
+    element.textContent =
+      "已加载路线原点，但尚未收到车辆GPS位置";
+    return;
+  }}
+
+  const origin = selectedRouteData.origin_wgs84;
+
+  const distance = distanceWgs84(
+    Number(latestNavigationFix.longitude),
+    Number(latestNavigationFix.latitude),
+    Number(origin.longitude),
+    Number(origin.latitude)
+  );
+
+  if (!Number.isFinite(distance)) {{
+    element.className = "card error";
+    element.style.display = "block";
+    element.textContent = "无法计算车辆到路线原点距离";
+    return;
+  }}
+
+  const nearEnough = distance <= 4.0;
+
+  element.className = nearEnough
+    ? "card ok"
+    : "card warn";
+
+  element.style.display = "block";
+  element.textContent =
+    "距路线原点：" + distance.toFixed(2) + " m"
+    + "\\n允许启动距离：≤ 4.00 m"
+    + "\\n状态："
+    + (
+      nearEnough
+        ? "已在路线原点附近"
+        : "请移动至路线原点附近"
+    );
+}}
+
+function showRouteOrigin(route) {{
+  selectedRouteData = route;
+
+  const origin = route.origin_gcj02;
+  const endpoint = route.end_gcj02;
+
+  if (!origin || !endpoint) {{
+    throw new Error("路线缺少起点或终点");
+  }}
+
+  const originPosition = [
+    Number(origin.longitude),
+    Number(origin.latitude)
+  ];
+
+  const endPosition = [
+    Number(endpoint.longitude),
+    Number(endpoint.latitude)
+  ];
+
+  const overlap = (
+    route.origin_wgs84
+    && route.end_wgs84
+    && distanceWgs84(
+      Number(route.origin_wgs84.longitude),
+      Number(route.origin_wgs84.latitude),
+      Number(route.end_wgs84.longitude),
+      Number(route.end_wgs84.latitude)
+    ) < 0.50
+  );
+
+  if (routeOriginMarker) {{
+    map.remove(routeOriginMarker);
+  }}
+
+  if (routeEndMarker) {{
+    map.remove(routeEndMarker);
+  }}
+
+  routeOriginMarker = new AMap.Marker({{
+    position: originPosition,
+    content: '<div class="origin-icon">起</div>',
+    offset: overlap
+      ? new AMap.Pixel(-23, -11)
+      : new AMap.Pixel(-11, -11),
+    zIndex: 96,
+    title: "路线起点"
+  }});
+
+  routeEndMarker = new AMap.Marker({{
+    position: endPosition,
+    content: '<div class="end-icon">终</div>',
+    offset: overlap
+      ? new AMap.Pixel(1, -11)
+      : new AMap.Pixel(-11, -11),
+    zIndex: 95,
+    title: "路线终点"
+  }});
+
+  map.add([
+    routeOriginMarker,
+    routeEndMarker
+  ]);
+
+  updateRouteOriginDistance();
+}}
+
 function vehicleContent(heading) {{
   return (
     '<div class="vehicle-icon" style="transform:rotate('
@@ -2314,43 +2729,58 @@ async function updateState() {{
     );
     const data = await response.json();
 
-    const localization = data.localization;
+    const navigation = (
+      data.navigation_fix || data.localization
+    );
+
+    latestNavigationFix = navigation;
+
     const vehicleStatus = document.getElementById(
       "vehicle-status"
     );
 
-    if (localization) {{
-      const stateText = localization.valid
+    if (navigation) {{
+      const stateText = navigation.valid
         ? "有效"
         : "无效";
 
-      vehicleStatus.className = localization.valid
+      vehicleStatus.className = navigation.valid
         ? "card ok"
         : "card warn";
 
+      const patrolLocalization = data.localization;
+      const patrolReady = (
+        patrolLocalization
+        && patrolLocalization.valid
+      );
+
       vehicleStatus.textContent =
-        "定位：" + stateText
-        + "\\n经度：" + localization.longitude.toFixed(9)
-        + "\\n纬度：" + localization.latitude.toFixed(9)
-        + "\\n高度：" + localization.altitude.toFixed(2) + " m"
-        + "\\n航向：" + localization.heading_deg.toFixed(1) + "°"
-        + "\\n卫星：" + localization.nsv1
-        + " / " + localization.nsv2
-        + "\\n原因：" + localization.reason;
+        "GPS/IMU：" + stateText
+        + "\\n巡迹定位："
+        + (patrolReady ? "有效" : "未就绪")
+        + "\\n经度：" + navigation.longitude.toFixed(9)
+        + "\\n纬度：" + navigation.latitude.toFixed(9)
+        + "\\n高度：" + navigation.altitude.toFixed(2) + " m"
+        + "\\n航向：" + navigation.heading_deg.toFixed(1) + "°"
+        + "\\n卫星：" + navigation.nsv1
+        + " / " + navigation.nsv2
+        + "\\n原因：" + navigation.reason;
 
       if (
-        Number.isFinite(localization.longitude_gcj02)
-        && Number.isFinite(localization.latitude_gcj02)
+        Number.isFinite(navigation.longitude_gcj02)
+        && Number.isFinite(navigation.latitude_gcj02)
       ) {{
         setVehicleMarker(
           [
-            localization.longitude_gcj02,
-            localization.latitude_gcj02
+            navigation.longitude_gcj02,
+            navigation.latitude_gcj02
           ],
-          localization.heading_deg
+          navigation.heading_deg
         );
       }}
     }}
+
+    updateRouteOriginDistance();
 
     const mission = data.mission;
     const missionStatus = document.getElementById(
@@ -2436,11 +2866,90 @@ function fitAll() {{
     overlays.push(vehicleMarker);
   }}
 
+  if (routeOriginMarker) {{
+    overlays.push(routeOriginMarker);
+  }}
+
+  if (routeEndMarker) {{
+    overlays.push(routeEndMarker);
+  }}
+
   map.setFitView(
     overlays,
     false,
     [60, 60, 60, 60]
   );
+}}
+
+function focusSelectedRoute(route, displayPoints) {{
+  if (
+    !Array.isArray(displayPoints)
+    || displayPoints.length < 2
+  ) {{
+    showError("当前路线没有足够的有效点，无法定位视野。");
+    return;
+  }}
+
+  const validPoints = displayPoints.filter(point => (
+    Array.isArray(point)
+    && point.length >= 2
+    && Number.isFinite(Number(point[0]))
+    && Number.isFinite(Number(point[1]))
+    && Number(point[0]) >= -180
+    && Number(point[0]) <= 180
+    && Number(point[1]) >= -90
+    && Number(point[1]) <= 90
+  ));
+
+  if (validPoints.length < 2) {{
+    showError("当前路线坐标无效，无法调整地图视野。");
+    return;
+  }}
+
+  followVehicleEnabled = false;
+
+  // 只依据当前规划路线调整视野，
+  // 不包含历史实际轨迹、小车位置或绘图关键点。
+  map.setFitView(
+    [plannedPolyline],
+    false,
+    [50, 50, 50, 50],
+    20
+  );
+
+  window.setTimeout(function() {{
+    const routeLength = Number(
+      route
+      && route.summary
+      && route.summary.total_length
+    ) || 0;
+
+    let minimumZoom = 13;
+
+    if (routeLength <= 100) {{
+      minimumZoom = 18;
+    }} else if (routeLength <= 300) {{
+      minimumZoom = 17;
+    }} else if (routeLength <= 1000) {{
+      minimumZoom = 15;
+    }}
+
+    const currentZoom = Number(map.getZoom());
+
+    if (
+      !Number.isFinite(currentZoom)
+      || currentZoom < minimumZoom
+    ) {{
+      const middlePoint = validPoints[
+        Math.floor(validPoints.length / 2)
+      ];
+
+      map.setZoomAndCenter(
+        minimumZoom,
+        middlePoint
+      );
+    }}
+  }}, 150);
 }}
 
 function syncKeypoints() {{
@@ -2996,6 +3505,7 @@ async function loadSelectedRoute() {{
     }}
 
     plannedPolyline.setPath(displayPoints);
+    showRouteOrigin(route);
 
     document.getElementById(
       "saved-route-info"
@@ -3015,12 +3525,234 @@ async function loadSelectedRoute() {{
       + Number(
         route.origin_wgs84.latitude
       ).toFixed(9)
+      + "\\n终点经度："
+      + Number(
+        route.end_wgs84.longitude
+      ).toFixed(9)
+      + "\\n终点纬度："
+      + Number(
+        route.end_wgs84.latitude
+      ).toFixed(9)
       + "\\n复现命令：./scripts/replay_route.sh "
       + route.name;
 
-    fitAll();
+    focusSelectedRoute(
+      route,
+      displayPoints
+    );
   }} catch (error) {{
     showError("路线显示失败：" + String(error));
+  }}
+}}
+
+async function startSelectedRoute() {{
+  showError("");
+
+  const name = document.getElementById(
+    "route-select"
+  ).value;
+
+  if (!name) {{
+    showError("请先选择一条路线。");
+    return;
+  }}
+
+  if (
+    !selectedRouteData
+    || selectedRouteData.name !== name
+  ) {{
+    await loadSelectedRoute();
+  }}
+
+  if (
+    !selectedRouteData
+    || selectedRouteData.name !== name
+  ) {{
+    showError("路线读取失败，无法开始巡迹。");
+    return;
+  }}
+
+  if (!latestNavigationFix) {{
+    showError("尚未收到车辆GPS位置。");
+    return;
+  }}
+
+  if (!latestNavigationFix.valid) {{
+    showError(
+      "GPS/IMU状态无效："
+      + latestNavigationFix.reason
+    );
+    return;
+  }}
+
+  const origin = selectedRouteData.origin_wgs84;
+
+  const distance = distanceWgs84(
+    Number(latestNavigationFix.longitude),
+    Number(latestNavigationFix.latitude),
+    Number(origin.longitude),
+    Number(origin.latitude)
+  );
+
+  if (!Number.isFinite(distance)) {{
+    showError("无法计算车辆到路线原点的距离。");
+    return;
+  }}
+
+  if (distance > 4.0) {{
+    showError(
+      "请移动至路线原点附近。当前距离："
+      + distance.toFixed(2)
+      + " m，允许距离不超过 4.00 m。"
+    );
+    return;
+  }}
+
+  const confirmed = window.confirm(
+    "准备启动路线“"
+    + name
+    + "”。当前系统没有障碍物地图，"
+    + "请确认车辆前后及整条路线无障碍，急停可用。"
+  );
+
+  if (!confirmed) {{
+    return;
+  }}
+
+  const status = document.getElementById(
+    "replay-status"
+  );
+
+  status.className = "card warn";
+  status.textContent = "巡迹控制：正在启动";
+
+  try {{
+    const response = await fetch(
+      "/api/replay/start",
+      {{
+        method: "POST",
+        headers: {{
+          "Content-Type": "application/json"
+        }},
+        body: JSON.stringify({{
+          name: name
+        }})
+      }}
+    );
+
+    const result = await response.json();
+
+    if (!response.ok) {{
+      throw new Error(
+        result.error || "启动巡迹失败"
+      );
+    }}
+
+    status.className = "card ok";
+    status.textContent =
+      "巡迹启动请求已提交："
+      + result.route
+      + "，距原点 "
+      + Number(result.origin_distance_m).toFixed(2)
+      + " m";
+  }} catch (error) {{
+    status.className = "card error";
+    status.style.display = "block";
+    status.textContent =
+      "巡迹启动失败：" + String(error);
+    showError(status.textContent);
+  }}
+}}
+
+async function stopReplay() {{
+  const confirmed = window.confirm(
+    "确认停止当前巡迹任务吗？"
+  );
+
+  if (!confirmed) {{
+    return;
+  }}
+
+  const status = document.getElementById(
+    "replay-status"
+  );
+
+  status.className = "card warn";
+  status.textContent = "巡迹控制：正在停止";
+
+  try {{
+    const response = await fetch(
+      "/api/replay/stop",
+      {{method: "POST"}}
+    );
+
+    const result = await response.json();
+
+    if (!response.ok) {{
+      throw new Error(
+        result.error || "停止巡迹失败"
+      );
+    }}
+
+    status.className = "card ok";
+    status.textContent =
+      "巡迹控制：已停止，底层节点保持运行";
+  }} catch (error) {{
+    status.className = "card error";
+    status.style.display = "block";
+    status.textContent =
+      "巡迹停止失败：" + String(error);
+    showError(status.textContent);
+  }}
+}}
+
+async function updateReplayStatus() {{
+  try {{
+    const response = await fetch(
+      "/api/replay/status",
+      {{cache: "no-store"}}
+    );
+
+    const result = await response.json();
+
+    if (!response.ok) {{
+      return;
+    }}
+
+    const status = document.getElementById(
+      "replay-status"
+    );
+
+    const state = String(
+      result.state || "IDLE"
+    );
+
+    status.className = (
+      state === "FAILED"
+        ? "card error"
+        : (
+          state === "STARTED"
+          || state === "STOPPED"
+            ? "card ok"
+            : "card"
+        )
+    );
+
+    status.style.display = "block";
+    status.textContent =
+      "巡迹控制：" + state
+      + (
+        result.route
+          ? "，路线：" + result.route
+          : ""
+      )
+      + (
+        result.message
+          ? "，信息：" + result.message
+          : ""
+      );
+  }} catch (error) {{
+    console.warn("巡迹状态读取失败", error);
   }}
 }}
 
@@ -3075,11 +3807,233 @@ document.getElementById(
 refreshRoutes();
 updateDesignPreview();
 setInterval(updateState, 500);
+setInterval(updateReplayStatus, 1000);
 updateState();
+updateReplayStatus();
 </script>
 </body>
 </html>
 """
+
+
+class ReplayController:
+    def __init__(
+        self,
+        workspace: Path,
+        route_store: RouteStore,
+        shared_state: SharedState,
+        maximum_origin_distance_m: float = 4.0,
+    ) -> None:
+        self.workspace = workspace
+        self.route_store = route_store
+        self.shared_state = shared_state
+        self.maximum_origin_distance_m = float(
+            maximum_origin_distance_m
+        )
+
+        self.lock = threading.Lock()
+        self.process: Optional[subprocess.Popen] = None
+        self.state: dict[str, Any] = {
+            "state": "IDLE",
+            "route": "",
+            "message": "waiting",
+            "exit_code": None,
+            "log_file": "",
+        }
+
+    def status(self) -> dict[str, Any]:
+        with self.lock:
+            return dict(self.state)
+
+    def start(
+        self,
+        route_name: str,
+    ) -> dict[str, Any]:
+        safe_name = sanitize_route_name(route_name)
+        route = self.route_store.load_route(safe_name)
+
+        snapshot = self.shared_state.snapshot()
+        navigation = snapshot.get("navigation_fix")
+
+        if navigation is None:
+            raise ValueError(
+                "尚未收到车辆GPS/IMU位置"
+            )
+
+        if not bool(navigation.get("valid", False)):
+            raise ValueError(
+                "GPS/IMU状态无效："
+                + str(navigation.get("reason", "unknown"))
+            )
+
+        origin = route["origin_wgs84"]
+
+        distance = horizontal_distance_wgs84(
+            (
+                float(navigation["longitude"]),
+                float(navigation["latitude"]),
+            ),
+            (
+                float(origin["longitude"]),
+                float(origin["latitude"]),
+            ),
+        )
+
+        if distance > self.maximum_origin_distance_m:
+            raise ValueError(
+                "请移动至路线原点附近："
+                f"当前距离 {distance:.2f} m，"
+                f"允许距离不超过 "
+                f"{self.maximum_origin_distance_m:.2f} m"
+            )
+
+        with self.lock:
+            if self.state.get("state") in (
+                "STARTING",
+                "STARTED",
+            ):
+                raise ValueError(
+                    "已有巡迹任务正在启动或运行，"
+                    "请先停止当前巡迹"
+                )
+
+            logs_directory = self.workspace / "logs"
+            logs_directory.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+            log_file = logs_directory / (
+                "map_replay_"
+                + time.strftime("%Y%m%d_%H%M%S")
+                + "_"
+                + safe_name
+                + ".log"
+            )
+
+            output = log_file.open(
+                "w",
+                encoding="utf-8",
+            )
+
+            process = subprocess.Popen(
+                [
+                    str(
+                        self.workspace
+                        / "scripts"
+                        / "replay_route.sh"
+                    ),
+                    safe_name,
+                    "--yes",
+                ],
+                cwd=str(self.workspace),
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                text=True,
+            )
+
+            output.close()
+            self.process = process
+            self.state = {
+                "state": "STARTING",
+                "route": safe_name,
+                "message": "安全检查和巡迹启动进行中",
+                "exit_code": None,
+                "log_file": str(log_file),
+            }
+
+        threading.Thread(
+            target=self._watch,
+            args=(process,),
+            daemon=True,
+            name="map-replay-watch",
+        ).start()
+
+        return {
+            "success": True,
+            "route": safe_name,
+            "origin_distance_m": distance,
+            "log_file": str(log_file),
+        }
+
+    def _watch(
+        self,
+        process: subprocess.Popen,
+    ) -> None:
+        exit_code = process.wait()
+
+        with self.lock:
+            if self.process is not process:
+                return
+
+            self.process = None
+            previous_state = self.state.get("state")
+
+            if previous_state == "STOPPING":
+                state = "STOPPED"
+                message = "巡迹已停止"
+            elif exit_code == 0:
+                state = "STARTED"
+                message = "启动脚本执行成功"
+            else:
+                state = "FAILED"
+                message = (
+                    "启动脚本失败，请查看日志："
+                    + str(self.state.get("log_file", ""))
+                )
+
+            self.state["state"] = state
+            self.state["message"] = message
+            self.state["exit_code"] = exit_code
+
+    def stop(self) -> dict[str, Any]:
+        with self.lock:
+            process = self.process
+            self.state["state"] = "STOPPING"
+            self.state["message"] = "正在请求停车"
+
+        if process is not None and process.poll() is None:
+            try:
+                os.killpg(
+                    process.pid,
+                    signal.SIGINT,
+                )
+            except ProcessLookupError:
+                pass
+
+        result = subprocess.run(
+            [
+                str(
+                    self.workspace
+                    / "scripts"
+                    / "stop_replay.sh"
+                )
+            ],
+            cwd=str(self.workspace),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+        with self.lock:
+            self.process = None
+            self.state["state"] = "STOPPED"
+            self.state["message"] = (
+                "巡迹已停止，底层节点保持运行"
+                if result.returncode == 0
+                else "停车脚本已执行，请检查日志"
+            )
+            self.state["exit_code"] = result.returncode
+
+        return {
+            "success": result.returncode == 0,
+            "message": self.state["message"],
+            "output": (
+                result.stdout + result.stderr
+            )[-3000:],
+        }
 
 
 class ApiContext:
@@ -3087,10 +4041,12 @@ class ApiContext:
         self,
         shared_state: SharedState,
         route_store: RouteStore,
+        replay_controller: ReplayController,
         html_page: str,
     ) -> None:
         self.shared_state = shared_state
         self.route_store = route_store
+        self.replay_controller = replay_controller
         self.html_page = html_page
 
 
@@ -3220,6 +4176,12 @@ def make_handler(
                     )
                     return
 
+                if parsed.path == "/api/replay/status":
+                    self.send_json(
+                        context.replay_controller.status()
+                    )
+                    return
+
                 route_prefix = "/api/routes/"
 
                 if parsed.path.startswith(route_prefix):
@@ -3270,6 +4232,26 @@ def make_handler(
                         context.route_store.save_route(
                             request
                         )
+                    )
+                    self.send_json(result)
+                    return
+
+                if parsed.path == "/api/replay/start":
+                    request = self.read_json()
+                    result = (
+                        context.replay_controller.start(
+                            request.get("name", "")
+                        )
+                    )
+                    self.send_json(
+                        result,
+                        HTTPStatus.ACCEPTED,
+                    )
+                    return
+
+                if parsed.path == "/api/replay/stop":
+                    result = (
+                        context.replay_controller.stop()
                     )
                     self.send_json(result)
                     return
@@ -3386,6 +4368,13 @@ def main() -> int:
         shared_state,
     )
 
+    replay_controller = ReplayController(
+        args.routes_dir.resolve().parent,
+        route_store,
+        shared_state,
+        maximum_origin_distance_m=4.0,
+    )
+
     html_page = build_html(
         args.amap_key,
         args.security_code,
@@ -3408,6 +4397,7 @@ def main() -> int:
     context = ApiContext(
         shared_state,
         route_store,
+        replay_controller,
         html_page,
     )
 

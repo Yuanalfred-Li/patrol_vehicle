@@ -712,8 +712,11 @@ class PatrolEntryExecutor(Node):
     def path_is_valid(path: EntryPath) -> bool:
         count = len(path.poses)
 
+        # 单点路径表示车辆已经处于路线起点容差范围内。
+        # 这是合法的零长度入轨任务，执行器启用后会立即完成，
+        # 随后任务管理器切换到正式路线跟踪。
         return (
-            count >= 2
+            count >= 1
             and len(path.directions) == count
             and len(path.steering_angles_deg) == count
         )

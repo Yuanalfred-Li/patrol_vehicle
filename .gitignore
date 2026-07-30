@@ -18,3 +18,6 @@ scripts/*.bak_*
 tools/*.bak_*
 routes/*_auto.yaml
 routes/*_smooth.yaml
+
+# Local patrol routes may contain real GPS coordinates
+routes/*.yaml
