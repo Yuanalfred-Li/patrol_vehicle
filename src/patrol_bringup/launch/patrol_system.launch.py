@@ -165,12 +165,10 @@ def launch_setup(context):
     mission_manager_parameters = section_parameters(
         config,
         'mission_manager',
-        exclude={
-            'start_service',
-            'stop_service',
-            'load_route_service',
-        },
     )
+    mission_manager_parameters[
+        'current_route_file'
+    ] = route_file
 
     nodes = [
         LogInfo(

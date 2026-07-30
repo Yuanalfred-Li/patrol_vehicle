@@ -1,0 +1,5 @@
+# 要加载的本地路线YAML绝对路径
+string route_file
+---
+bool success
+string message

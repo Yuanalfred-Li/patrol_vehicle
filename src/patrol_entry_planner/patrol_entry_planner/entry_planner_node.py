@@ -13,7 +13,9 @@ import yaml
 from geometry_msgs.msg import Pose, PoseStamped
 from nav_msgs.msg import Path as NavPath
 from patrol_interfaces.msg import EntryPath, LocalizationStatus
+from patrol_interfaces.srv import LoadRoute
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import (
     DurabilityPolicy,
     QoSProfile,
@@ -276,6 +278,10 @@ class PatrolEntryPlanner(Node):
             'route_file',
             '/home/nvidia/patrol_ws/routes/route.yaml',
         )
+        self.declare_parameter(
+            'load_route_service',
+            '/patrol/entry_planner/load_route',
+        )
         self.declare_parameter('pose_topic', '/patrol/pose')
         self.declare_parameter(
             'localization_status_topic',
@@ -380,6 +386,16 @@ class PatrolEntryPlanner(Node):
             Trigger,
             '/patrol/entry_planner/clear',
             self.clear_callback,
+        )
+
+        self.create_service(
+            LoadRoute,
+            str(
+                self.get_parameter(
+                    'load_route_service'
+                ).value
+            ),
+            self.load_route_callback,
         )
 
         self.get_logger().info(
@@ -572,13 +588,17 @@ class PatrolEntryPlanner(Node):
 
         return None
 
-    def load_route_start(
+    def inspect_route_file(
         self,
-    ) -> Tuple[str, float, float, float]:
-        route_file = Path(str(
-            self.get_parameter('route_file').value
-        ))
-
+        route_file: Path,
+    ) -> Tuple[
+        str,
+        float,
+        float,
+        float,
+        int,
+        float,
+    ]:
         if not route_file.is_file():
             raise FileNotFoundError(route_file)
 
@@ -604,26 +624,36 @@ class PatrolEntryPlanner(Node):
             )
 
         origin = parse_route_origin(data)
+        points = []
 
-        first_x, first_y, _ = route_waypoint_to_local(
-            waypoints[0],
-            0,
-            origin,
-        )
-
-        second_x, second_y, _ = route_waypoint_to_local(
-            waypoints[1],
-            1,
-            origin,
-        )
-
-        if math.hypot(
-            second_x - first_x,
-            second_y - first_y,
-        ) < 1.0e-6:
-            raise ValueError(
-                'first route segment has zero length'
+        for index, waypoint in enumerate(waypoints):
+            x, y, _ = route_waypoint_to_local(
+                waypoint,
+                index,
+                origin,
             )
+            points.append((x, y))
+
+        total_length = 0.0
+
+        for index in range(len(points) - 1):
+            segment_length = math.hypot(
+                points[index + 1][0]
+                - points[index][0],
+                points[index + 1][1]
+                - points[index][1],
+            )
+
+            if segment_length < 1.0e-6:
+                raise ValueError(
+                    f'route segment {index + 1} '
+                    'has zero length'
+                )
+
+            total_length += segment_length
+
+        first_x, first_y = points[0]
+        second_x, second_y = points[1]
 
         heading = math.atan2(
             second_y - first_y,
@@ -635,7 +665,109 @@ class PatrolEntryPlanner(Node):
             first_x,
             first_y,
             heading,
+            len(points),
+            total_length,
         )
+
+    def load_route_start(
+        self,
+    ) -> Tuple[str, float, float, float]:
+        route_file = Path(str(
+            self.get_parameter('route_file').value
+        ))
+
+        (
+            frame_id,
+            first_x,
+            first_y,
+            heading,
+            _,
+            _,
+        ) = self.inspect_route_file(route_file)
+
+        return (
+            frame_id,
+            first_x,
+            first_y,
+            heading,
+        )
+
+    def load_route_callback(
+        self,
+        request: LoadRoute.Request,
+        response: LoadRoute.Response,
+    ) -> LoadRoute.Response:
+        raw_path = str(request.route_file).strip()
+
+        if not raw_path:
+            response.success = False
+            response.message = 'route_file is empty'
+            return response
+
+        route_path = Path(raw_path).expanduser()
+
+        if not route_path.is_absolute():
+            response.success = False
+            response.message = (
+                'route_file must be an absolute path'
+            )
+            return response
+
+        route_path = route_path.resolve()
+
+        try:
+            (
+                _,
+                _,
+                _,
+                _,
+                point_count,
+                total_length,
+            ) = self.inspect_route_file(route_path)
+        except Exception as exc:
+            response.success = False
+            response.message = (
+                f'route load failed: {exc}'
+            )
+            return response
+
+        result = self.set_parameters_atomically([
+            Parameter(
+                'route_file',
+                Parameter.Type.STRING,
+                str(route_path),
+            ),
+        ])
+
+        if not result.successful:
+            response.success = False
+            response.message = (
+                'failed to update route_file parameter: '
+                f'{result.reason}'
+            )
+            return response
+
+        # 清除此前规划并发布的入轨路径，避免误用旧路径。
+        entry = EntryPath()
+        entry.header.stamp = (
+            self.get_clock().now().to_msg()
+        )
+        entry.header.frame_id = 'patrol_map'
+        self.entry_path_pub.publish(entry)
+
+        nav_path = NavPath()
+        nav_path.header = entry.header
+        self.nav_path_pub.publish(nav_path)
+
+        response.success = True
+        response.message = (
+            f'entry planner loaded {route_path.name}; '
+            f'points={point_count}, '
+            f'length={total_length:.2f}m'
+        )
+
+        self.get_logger().warning(response.message)
+        return response
 
     def hybrid_a_star(
         self,

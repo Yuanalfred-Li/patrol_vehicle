@@ -32,6 +32,7 @@ localization:
   pose_topic: /patrol/pose
   odom_topic: /patrol/odom
   status_topic: /patrol/localization_status
+  load_route_service: /patrol/localization/load_route
 
   frame_id: patrol_map
   child_frame_id: base_link
@@ -74,6 +75,7 @@ gnss_degraded:
   auto_resume_after_stop: false
 
 entry_planner:
+  load_route_service: /patrol/entry_planner/load_route
   pose_topic: /patrol/pose
   localization_status_topic: /patrol/localization_status
   entry_path_topic: /patrol/entry_path
@@ -128,6 +130,7 @@ route_follower:
   route_path_topic: /patrol/target_path
   lookahead_target_topic: /patrol/lookahead_target
   status_topic: /patrol/route_follower/status
+  load_route_service: /patrol/route_follower/load_route
 
   control_rate_hz: 20.0
   lookahead_distance_m: 1.50
@@ -180,6 +183,11 @@ mission_manager:
   start_service: /patrol/mission/start
   stop_service: /patrol/mission/stop
   load_route_service: /patrol/mission/load_route
+  localization_load_route_service: /patrol/localization/load_route
+  entry_planner_load_route_service: /patrol/entry_planner/load_route
+  route_follower_load_route_service: /patrol/route_follower/load_route
+  current_route_file: /home/nvidia/patrol_ws/routes/test_route.yaml
+
 
 map_frontend:
   server_host: 0.0.0.0

@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 
+from pathlib import Path
 from typing import Optional
 
 import rclpy
 from patrol_interfaces.msg import TaskStatus
+from patrol_interfaces.srv import LoadRoute
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import (
     DurabilityPolicy,
     QoSProfile,
@@ -29,6 +32,36 @@ class PatrolMissionManager(Node):
         self.declare_parameter(
             'route_status_topic',
             '/patrol/route_follower/status',
+        )
+
+        self.declare_parameter(
+            'start_service',
+            '/patrol/mission/start',
+        )
+        self.declare_parameter(
+            'stop_service',
+            '/patrol/mission/stop',
+        )
+        self.declare_parameter(
+            'load_route_service',
+            '/patrol/mission/load_route',
+        )
+
+        self.declare_parameter(
+            'localization_load_route_service',
+            '/patrol/localization/load_route',
+        )
+        self.declare_parameter(
+            'entry_planner_load_route_service',
+            '/patrol/entry_planner/load_route',
+        )
+        self.declare_parameter(
+            'route_follower_load_route_service',
+            '/patrol/route_follower/load_route',
+        )
+        self.declare_parameter(
+            'current_route_file',
+            '',
         )
 
         status_qos = QoSProfile(depth=1)
@@ -76,15 +109,57 @@ class PatrolMissionManager(Node):
             '/patrol/route_follower/enable',
         )
 
+        self.localization_load_client = self.create_client(
+            LoadRoute,
+            str(
+                self.get_parameter(
+                    'localization_load_route_service'
+                ).value
+            ),
+        )
+        self.entry_planner_load_client = self.create_client(
+            LoadRoute,
+            str(
+                self.get_parameter(
+                    'entry_planner_load_route_service'
+                ).value
+            ),
+        )
+        self.route_follower_load_client = self.create_client(
+            LoadRoute,
+            str(
+                self.get_parameter(
+                    'route_follower_load_route_service'
+                ).value
+            ),
+        )
+
         self.create_service(
             Trigger,
-            '/patrol/mission/start',
+            str(
+                self.get_parameter(
+                    'start_service'
+                ).value
+            ),
             self.start_callback,
         )
         self.create_service(
             Trigger,
-            '/patrol/mission/stop',
+            str(
+                self.get_parameter(
+                    'stop_service'
+                ).value
+            ),
             self.stop_callback,
+        )
+        self.create_service(
+            LoadRoute,
+            str(
+                self.get_parameter(
+                    'load_route_service'
+                ).value
+            ),
+            self.load_route_callback,
         )
 
         self.phase = 'IDLE'
@@ -92,6 +167,17 @@ class PatrolMissionManager(Node):
         self.plan_future = None
         self.entry_enable_future = None
         self.route_enable_future = None
+
+        self.load_route_future = None
+        self.rollback_futures = []
+        self.pending_route_file = ''
+        self.previous_route_file = ''
+        self.route_load_error = ''
+        self.current_route_file = str(
+            self.get_parameter(
+                'current_route_file'
+            ).value
+        )
 
         self.entry_status: Optional[TaskStatus] = None
         self.route_status: Optional[TaskStatus] = None
@@ -105,6 +191,326 @@ class PatrolMissionManager(Node):
         )
 
         self.get_logger().info('mission manager ready')
+
+    def route_load_clients(self):
+        return [
+            (
+                'route follower',
+                self.route_follower_load_client,
+            ),
+            (
+                'entry planner',
+                self.entry_planner_load_client,
+            ),
+            (
+                'localization',
+                self.localization_load_client,
+            ),
+        ]
+
+    @staticmethod
+    def make_load_route_request(
+        route_file: str,
+    ) -> LoadRoute.Request:
+        request = LoadRoute.Request()
+        request.route_file = str(route_file)
+        return request
+
+    def load_route_callback(
+        self,
+        request: LoadRoute.Request,
+        response: LoadRoute.Response,
+    ) -> LoadRoute.Response:
+        if self.phase not in (
+            'IDLE',
+            'SUCCEEDED',
+            'FAILED',
+        ):
+            response.success = False
+            response.message = (
+                f'cannot load route while mission state '
+                f'is {self.phase}'
+            )
+            return response
+
+        raw_path = str(request.route_file).strip()
+
+        if not raw_path:
+            response.success = False
+            response.message = 'route_file is empty'
+            return response
+
+        route_path = Path(raw_path).expanduser()
+
+        if not route_path.is_absolute():
+            response.success = False
+            response.message = (
+                'route_file must be an absolute path'
+            )
+            return response
+
+        route_path = route_path.resolve()
+
+        if not route_path.is_file():
+            response.success = False
+            response.message = (
+                f'route file not found: {route_path}'
+            )
+            return response
+
+        unavailable = [
+            name
+            for name, client in self.route_load_clients()
+            if not client.service_is_ready()
+        ]
+
+        if unavailable:
+            response.success = False
+            response.message = (
+                'route load services unavailable: '
+                + ', '.join(unavailable)
+            )
+            return response
+
+        self.disable_components()
+
+        self.pending_route_file = str(route_path)
+        self.previous_route_file = (
+            self.current_route_file
+        )
+        self.route_load_error = ''
+        self.rollback_futures = []
+
+        self.load_route_future = (
+            self.route_follower_load_client.call_async(
+                self.make_load_route_request(
+                    self.pending_route_file
+                )
+            )
+        )
+
+        self.phase = 'LOADING_ROUTE_FOLLOWER'
+
+        self.publish_status(
+            TaskStatus.RUNNING,
+            (
+                f'loading route follower: '
+                f'{route_path.name}'
+            ),
+            0.10,
+        )
+
+        response.success = True
+        response.message = (
+            f'route load accepted: {route_path}'
+        )
+
+        self.get_logger().warning(response.message)
+        return response
+
+    def process_route_load(self) -> None:
+        if (
+            self.load_route_future is None
+            or not self.load_route_future.done()
+        ):
+            return
+
+        current_phase = self.phase
+
+        try:
+            result = self.load_route_future.result()
+        except Exception as exc:
+            self.begin_route_rollback(
+                f'{current_phase} exception: {exc}'
+            )
+            return
+
+        self.load_route_future = None
+
+        if result is None or not result.success:
+            message = (
+                result.message
+                if result is not None
+                else 'no route load response'
+            )
+
+            self.begin_route_rollback(
+                f'{current_phase} failed: {message}'
+            )
+            return
+
+        if current_phase == 'LOADING_ROUTE_FOLLOWER':
+            self.load_route_future = (
+                self.entry_planner_load_client.call_async(
+                    self.make_load_route_request(
+                        self.pending_route_file
+                    )
+                )
+            )
+            self.phase = 'LOADING_ENTRY_PLANNER'
+
+            self.publish_status(
+                TaskStatus.RUNNING,
+                'route follower loaded; loading entry planner',
+                0.40,
+            )
+            return
+
+        if current_phase == 'LOADING_ENTRY_PLANNER':
+            self.load_route_future = (
+                self.localization_load_client.call_async(
+                    self.make_load_route_request(
+                        self.pending_route_file
+                    )
+                )
+            )
+            self.phase = 'LOADING_LOCALIZATION'
+
+            self.publish_status(
+                TaskStatus.RUNNING,
+                'entry planner loaded; loading localization',
+                0.70,
+            )
+            return
+
+        parameter_result = self.set_parameters_atomically([
+            Parameter(
+                'current_route_file',
+                Parameter.Type.STRING,
+                self.pending_route_file,
+            ),
+        ])
+
+        if not parameter_result.successful:
+            self.begin_route_rollback(
+                'failed to update current_route_file: '
+                f'{parameter_result.reason}'
+            )
+            return
+
+        self.current_route_file = self.pending_route_file
+        loaded_name = Path(
+            self.current_route_file
+        ).name
+
+        self.pending_route_file = ''
+        self.previous_route_file = ''
+        self.route_load_error = ''
+        self.phase = 'IDLE'
+
+        self.publish_status(
+            TaskStatus.IDLE,
+            f'route loaded and ready: {loaded_name}',
+            0.0,
+        )
+
+        self.get_logger().warning(
+            f'route load completed: '
+            f'{self.current_route_file}'
+        )
+
+    def begin_route_rollback(
+        self,
+        reason: str,
+    ) -> None:
+        self.disable_components()
+        self.load_route_future = None
+        self.route_load_error = str(reason)
+        self.rollback_futures = []
+
+        if (
+            self.previous_route_file
+            and self.previous_route_file
+            != self.pending_route_file
+        ):
+            for name, client in self.route_load_clients():
+                if not client.service_is_ready():
+                    continue
+
+                future = client.call_async(
+                    self.make_load_route_request(
+                        self.previous_route_file
+                    )
+                )
+                self.rollback_futures.append(
+                    (name, future)
+                )
+
+        if not self.rollback_futures:
+            self.finish_route_load_failure(
+                'rollback not available'
+            )
+            return
+
+        self.phase = 'ROLLING_BACK_ROUTE'
+
+        self.publish_status(
+            TaskStatus.RUNNING,
+            (
+                f'route load failed; restoring previous '
+                f'route: {self.route_load_error}'
+            ),
+            0.0,
+        )
+
+    def process_route_rollback(self) -> None:
+        if any(
+            not future.done()
+            for _, future in self.rollback_futures
+        ):
+            return
+
+        failures = []
+
+        for name, future in self.rollback_futures:
+            try:
+                result = future.result()
+            except Exception as exc:
+                failures.append(
+                    f'{name}: {exc}'
+                )
+                continue
+
+            if result is None or not result.success:
+                message = (
+                    result.message
+                    if result is not None
+                    else 'no response'
+                )
+                failures.append(
+                    f'{name}: {message}'
+                )
+
+        detail = (
+            'rollback completed'
+            if not failures
+            else 'rollback issues: ' + '; '.join(failures)
+        )
+
+        self.finish_route_load_failure(detail)
+
+    def finish_route_load_failure(
+        self,
+        rollback_detail: str,
+    ) -> None:
+        message = (
+            f'route load failed: {self.route_load_error}; '
+            f'{rollback_detail}'
+        )
+
+        self.phase = 'FAILED'
+        self.load_route_future = None
+        self.rollback_futures = []
+        self.pending_route_file = ''
+        self.previous_route_file = ''
+
+        self.publish_status(
+            TaskStatus.FAILED,
+            message,
+            0.0,
+        )
+
+        self.get_logger().error(message)
 
     def start_callback(
         self,
@@ -160,6 +566,19 @@ class PatrolMissionManager(Node):
 
         self.disable_components()
 
+        if self.phase in (
+            'LOADING_ROUTE_FOLLOWER',
+            'LOADING_ENTRY_PLANNER',
+            'LOADING_LOCALIZATION',
+            'ROLLING_BACK_ROUTE',
+        ):
+            response.success = True
+            response.message = (
+                'motion stopped; route operation still '
+                'in progress'
+            )
+            return response
+
         self.phase = 'IDLE'
         self.plan_future = None
         self.entry_enable_future = None
@@ -206,6 +625,16 @@ class PatrolMissionManager(Node):
 
         elif self.phase == 'ROUTE':
             self.process_route_following()
+
+        elif self.phase in (
+            'LOADING_ROUTE_FOLLOWER',
+            'LOADING_ENTRY_PLANNER',
+            'LOADING_LOCALIZATION',
+        ):
+            self.process_route_load()
+
+        elif self.phase == 'ROLLING_BACK_ROUTE':
+            self.process_route_rollback()
 
     def process_planning(self) -> None:
         if (

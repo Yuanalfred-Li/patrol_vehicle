@@ -2,14 +2,18 @@
 
 import math
 import time
+from pathlib import Path
 from typing import Optional, Tuple
 
 import rclpy
+import yaml
 from geometry_msgs.msg import PoseStamped, TransformStamped
 from msg_out.msg import ImuStatus
 from nav_msgs.msg import Odometry
 from patrol_interfaces.msg import LocalizationStatus
+from patrol_interfaces.srv import LoadRoute
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from sensor_msgs.msg import NavSatFix
 from tf2_ros import TransformBroadcaster
 
@@ -101,6 +105,10 @@ class PatrolLocalization(Node):
             'status_topic',
             '/patrol/localization_status',
         )
+        self.declare_parameter(
+            'load_route_service',
+            '/patrol/localization/load_route',
+        )
 
         self.declare_parameter('frame_id', 'patrol_map')
         self.declare_parameter('child_frame_id', 'base_link')
@@ -182,6 +190,16 @@ class PatrolLocalization(Node):
             20,
         )
 
+        self.create_service(
+            LoadRoute,
+            str(
+                self.get_parameter(
+                    'load_route_service'
+                ).value
+            ),
+            self.load_route_callback,
+        )
+
         self.tf_broadcaster = TransformBroadcaster(self)
 
         self.create_timer(0.1, self.update)
@@ -191,6 +209,155 @@ class PatrolLocalization(Node):
             f'gps={self.gps_topic}, '
             f'imu={self.imu_status_topic}'
         )
+
+    def load_route_callback(
+        self,
+        request: LoadRoute.Request,
+        response: LoadRoute.Response,
+    ) -> LoadRoute.Response:
+        raw_path = str(request.route_file).strip()
+
+        if not raw_path:
+            response.success = False
+            response.message = 'route_file is empty'
+            return response
+
+        route_path = Path(raw_path).expanduser()
+
+        if not route_path.is_absolute():
+            response.success = False
+            response.message = (
+                'route_file must be an absolute path'
+            )
+            return response
+
+        route_path = route_path.resolve()
+
+        if not route_path.is_file():
+            response.success = False
+            response.message = (
+                f'route file not found: {route_path}'
+            )
+            return response
+
+        try:
+            with route_path.open(
+                'r',
+                encoding='utf-8',
+            ) as file:
+                data = yaml.safe_load(file)
+        except (OSError, yaml.YAMLError) as exc:
+            response.success = False
+            response.message = (
+                f'route YAML read failed: {exc}'
+            )
+            return response
+
+        if not isinstance(data, dict):
+            response.success = False
+            response.message = (
+                'route YAML root must be a mapping'
+            )
+            return response
+
+        waypoints = data.get('waypoints')
+
+        if (
+            not isinstance(waypoints, list)
+            or len(waypoints) < 2
+        ):
+            response.success = False
+            response.message = (
+                'route requires at least two waypoints'
+            )
+            return response
+
+        origin = data.get('origin')
+
+        if not isinstance(origin, dict):
+            response.success = False
+            response.message = (
+                'route origin must be a mapping'
+            )
+            return response
+
+        try:
+            latitude = float(origin['latitude'])
+            longitude = float(origin['longitude'])
+            altitude = float(origin['altitude'])
+        except (KeyError, TypeError, ValueError) as exc:
+            response.success = False
+            response.message = (
+                f'invalid route origin: {exc}'
+            )
+            return response
+
+        values = (
+            latitude,
+            longitude,
+            altitude,
+        )
+
+        if not all(math.isfinite(value) for value in values):
+            response.success = False
+            response.message = (
+                'route origin contains non-finite value'
+            )
+            return response
+
+        if not -90.0 <= latitude <= 90.0:
+            response.success = False
+            response.message = (
+                'route origin latitude is out of range'
+            )
+            return response
+
+        if not -180.0 <= longitude <= 180.0:
+            response.success = False
+            response.message = (
+                'route origin longitude is out of range'
+            )
+            return response
+
+        result = self.set_parameters_atomically([
+            Parameter(
+                'origin_set',
+                Parameter.Type.BOOL,
+                True,
+            ),
+            Parameter(
+                'origin_latitude',
+                Parameter.Type.DOUBLE,
+                latitude,
+            ),
+            Parameter(
+                'origin_longitude',
+                Parameter.Type.DOUBLE,
+                longitude,
+            ),
+            Parameter(
+                'origin_altitude',
+                Parameter.Type.DOUBLE,
+                altitude,
+            ),
+        ])
+
+        if not result.successful:
+            response.success = False
+            response.message = (
+                'failed to update localization origin: '
+                f'{result.reason}'
+            )
+            return response
+
+        response.success = True
+        response.message = (
+            'localization origin loaded from '
+            f'{route_path.name}'
+        )
+
+        self.get_logger().warning(response.message)
+        return response
 
     def gps_callback(self, msg: NavSatFix) -> None:
         self.latest_gps = msg

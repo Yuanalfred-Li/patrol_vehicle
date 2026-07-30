@@ -10,7 +10,9 @@ import yaml
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path as NavPath
 from patrol_interfaces.msg import LocalizationStatus, TaskStatus
+from patrol_interfaces.srv import LoadRoute
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import (
     DurabilityPolicy,
     QoSProfile,
@@ -284,6 +286,10 @@ class PatrolRouteFollower(Node):
             'status_topic',
             '/patrol/route_follower/status',
         )
+        self.declare_parameter(
+            'load_route_service',
+            '/patrol/route_follower/load_route',
+        )
 
         self.declare_parameter('control_rate_hz', 20.0)
         self.declare_parameter('lookahead_distance', 1.0)
@@ -415,6 +421,16 @@ class PatrolRouteFollower(Node):
             self.enable_callback,
         )
 
+        self.create_service(
+            LoadRoute,
+            str(
+                self.get_parameter(
+                    'load_route_service'
+                ).value
+            ),
+            self.load_route_callback,
+        )
+
         rate = float(
             self.get_parameter('control_rate_hz').value
         )
@@ -440,14 +456,21 @@ class PatrolRouteFollower(Node):
             f'file={self.route_file}'
         )
 
-    def load_route(self) -> None:
-        if not self.route_file.is_file():
+    def parse_route_file(
+        self,
+        route_file: Path,
+    ) -> Tuple[
+        str,
+        List[Dict[str, float]],
+        List[float],
+        float,
+    ]:
+        if not route_file.is_file():
             raise FileNotFoundError(
-                f'route file not found: '
-                f'{self.route_file}'
+                f'route file not found: {route_file}'
             )
 
-        with self.route_file.open(
+        with route_file.open(
             'r',
             encoding='utf-8',
         ) as file:
@@ -471,12 +494,12 @@ class PatrolRouteFollower(Node):
                 'two waypoints'
             )
 
-        self.frame_id = str(
+        frame_id = str(
             data.get('frame_id', 'patrol_map')
         )
 
         origin = parse_route_origin(data)
-        points = []
+        points: List[Dict[str, float]] = []
 
         for index, raw in enumerate(raw_points):
             x, y, z = route_waypoint_to_local(
@@ -511,9 +534,131 @@ class PatrolRouteFollower(Node):
                 cumulative[-1] + length
             )
 
+        total_length = cumulative[-1]
+
+        return (
+            frame_id,
+            points,
+            cumulative,
+            total_length,
+        )
+
+    def load_route(
+        self,
+        route_file: Optional[Path] = None,
+    ) -> None:
+        candidate = (
+            self.route_file
+            if route_file is None
+            else route_file
+        )
+
+        (
+            frame_id,
+            points,
+            cumulative,
+            total_length,
+        ) = self.parse_route_file(candidate)
+
+        self.route_file = candidate
+        self.frame_id = frame_id
         self.points = points
         self.cumulative_s = cumulative
-        self.total_length = cumulative[-1]
+        self.total_length = total_length
+
+    def load_route_callback(
+        self,
+        request: LoadRoute.Request,
+        response: LoadRoute.Response,
+    ) -> LoadRoute.Response:
+        if self.enabled:
+            response.success = False
+            response.message = (
+                'cannot load route while route follower '
+                'is enabled'
+            )
+            return response
+
+        raw_path = str(request.route_file).strip()
+
+        if not raw_path:
+            response.success = False
+            response.message = 'route_file is empty'
+            return response
+
+        route_path = Path(raw_path).expanduser()
+
+        if not route_path.is_absolute():
+            response.success = False
+            response.message = (
+                'route_file must be an absolute path'
+            )
+            return response
+
+        route_path = route_path.resolve()
+
+        try:
+            (
+                frame_id,
+                points,
+                cumulative,
+                total_length,
+            ) = self.parse_route_file(route_path)
+        except Exception as exc:
+            response.success = False
+            response.message = (
+                f'route load failed: {exc}'
+            )
+            return response
+
+        parameter_result = self.set_parameters_atomically([
+            Parameter(
+                'route_file',
+                Parameter.Type.STRING,
+                str(route_path),
+            ),
+        ])
+
+        if not parameter_result.successful:
+            response.success = False
+            response.message = (
+                'failed to update route_file parameter: '
+                f'{parameter_result.reason}'
+            )
+            return response
+
+        # 所有校验完成后再整体替换，避免失败时破坏旧路线。
+        self.route_file = route_path
+        self.frame_id = frame_id
+        self.points = points
+        self.cumulative_s = cumulative
+        self.total_length = total_length
+
+        self.progress_initialized = False
+        self.progress_s = 0.0
+        self.last_log_time = 0.0
+
+        self.publish_stop()
+        self.publish_route_path()
+        self.publish_status(
+            TaskStatus.IDLE,
+            (
+                f'route loaded: {route_path.name}; '
+                f'points={len(points)}, '
+                f'length={total_length:.2f}m'
+            ),
+            0.0,
+        )
+
+        response.success = True
+        response.message = (
+            f'route follower loaded {route_path.name}; '
+            f'points={len(points)}, '
+            f'length={total_length:.2f}m'
+        )
+
+        self.get_logger().warning(response.message)
+        return response
 
     def pose_callback(self, msg: PoseStamped) -> None:
         self.latest_pose = msg

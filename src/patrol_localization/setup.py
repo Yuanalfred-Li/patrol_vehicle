@@ -16,7 +16,7 @@ setup(
             ['package.xml'],
         ),
     ],
-    install_requires=['setuptools'],
+    install_requires=['setuptools', 'PyYAML'],
     zip_safe=True,
     maintainer='nvidia',
     maintainer_email='nvidia@example.com',

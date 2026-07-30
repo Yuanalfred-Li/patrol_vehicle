@@ -12,6 +12,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/EntryPath.msg"
   "msg/TaskStatus.msg"
   "srv/SetControlMode.srv"
+  "srv/LoadRoute.srv"
   DEPENDENCIES
     std_msgs
     geometry_msgs
