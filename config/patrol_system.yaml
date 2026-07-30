@@ -50,7 +50,7 @@ localization:
 # 弱GNSS降级模式。
 # 当前先保持关闭，完成代码和台架测试后再改为 true。
 gnss_degraded:
-  enabled: false
+  enabled: true
 
   # 从首次发现GNSS异常开始计时，防抖时间包含在3秒总时间内。
   weak_debounce_sec: 0.3
