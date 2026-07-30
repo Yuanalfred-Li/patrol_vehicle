@@ -12,6 +12,7 @@ from msg_out.msg import ImuStatus
 from nav_msgs.msg import Odometry
 from patrol_interfaces.msg import LocalizationStatus
 from patrol_interfaces.srv import LoadRoute
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from sensor_msgs.msg import NavSatFix
@@ -600,7 +601,7 @@ def main(args=None) -> None:
 
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()

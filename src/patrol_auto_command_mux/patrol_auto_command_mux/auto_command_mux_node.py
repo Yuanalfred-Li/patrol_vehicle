@@ -5,6 +5,7 @@ from typing import Optional
 
 import rclpy
 from patrol_interfaces.msg import TaskStatus
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -267,7 +268,7 @@ def main(args=None) -> None:
 
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()

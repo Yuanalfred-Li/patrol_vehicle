@@ -44,8 +44,6 @@ if [ -z "$ROUTE_NAME" ]; then
     echo "  $0 东门路线"
     echo "  $0 \"教学楼 夜间巡逻\""
     echo "  $0 东门路线 --yes"
-    echo
-    echo "--yes：通过全部安全检查后无需手动输入 START"
     exit 1
 fi
 
@@ -58,8 +56,6 @@ esac
 
 ROUTE_FILE="$ROUTES_DIR/${ROUTE_NAME}.yaml"
 RUN_DIR="$LOGS_DIR/replay_$(date +%Y%m%d_%H%M%S)_${ROUTE_NAME}"
-LAUNCH_LOG="$RUN_DIR/replay_launch.log"
-PID_FILE="$RUN_DIR/replay_launch.pid"
 
 mkdir -p "$RUN_DIR"
 ln -sfn "$RUN_DIR" "$LOGS_DIR/latest_replay"
@@ -67,7 +63,7 @@ ln -sfn "$RUN_DIR" "$LOGS_DIR/latest_replay"
 set +u
 source /opt/ros/humble/setup.bash
 source /home/nvidia/ros2_humble_main/install/setup.bash
-source /home/nvidia/patrol_ws/install/setup.bash
+source "$WS/install/setup.bash"
 set -u
 
 if [ ! -f "$CONFIG_FILE" ]; then
@@ -91,7 +87,8 @@ if [ ! -f "$ROUTE_FILE" ]; then
     exit 1
 fi
 
-python3 - "$ROUTE_FILE" <<'PY' | tee "$RUN_DIR/route_check.txt"
+python3 - "$ROUTE_FILE" <<'PY' |
+    tee "$RUN_DIR/route_check.txt"
 import math
 import sys
 from pathlib import Path
@@ -99,50 +96,44 @@ from pathlib import Path
 import yaml
 
 path = Path(sys.argv[1])
-
-data = yaml.safe_load(
-    path.read_text(encoding="utf-8")
-)
+data = yaml.safe_load(path.read_text(encoding="utf-8"))
 
 if not isinstance(data, dict):
     raise SystemExit("路线 YAML 根节点无效")
 
-format_version = int(
-    data.get("format_version", 0)
-)
+format_version = int(data.get("format_version", 0))
 
 if format_version < 2:
-    raise SystemExit(
-        "路线格式版本低于2，禁止实车复现"
-    )
+    raise SystemExit("路线格式版本低于2，禁止实车复现")
 
 origin = data.get("origin")
 
 if not isinstance(origin, dict):
     raise SystemExit("路线缺少 origin")
 
-values = [
-    float(origin["latitude"]),
-    float(origin["longitude"]),
-    float(origin["altitude"]),
-]
+try:
+    origin_values = [
+        float(origin["latitude"]),
+        float(origin["longitude"]),
+        float(origin["altitude"]),
+    ]
+except (KeyError, TypeError, ValueError) as exc:
+    raise SystemExit(f"路线 origin 无效：{exc}") from exc
 
-if not all(math.isfinite(value) for value in values):
+if not all(math.isfinite(value) for value in origin_values):
     raise SystemExit("origin 包含无效数值")
 
-if not -90.0 <= values[0] <= 90.0:
+if not -90.0 <= origin_values[0] <= 90.0:
     raise SystemExit("origin latitude 超出范围")
 
-if not -180.0 <= values[1] <= 180.0:
+if not -180.0 <= origin_values[1] <= 180.0:
     raise SystemExit("origin longitude 超出范围")
 
 if (
-    abs(values[0]) < 1.0e-8
-    and abs(values[1]) < 1.0e-8
+    abs(origin_values[0]) < 1.0e-8
+    and abs(origin_values[1]) < 1.0e-8
 ):
-    raise SystemExit(
-        "origin 为测试值 0,0，禁止实车复现"
-    )
+    raise SystemExit("origin 为测试值 0,0，禁止实车复现")
 
 waypoints = data.get("waypoints")
 
@@ -153,156 +144,60 @@ for index, point in enumerate(waypoints):
     if not isinstance(point, dict):
         raise SystemExit(f"轨迹点 {index} 格式无效")
 
-    for key in (
-        "latitude",
-        "longitude",
-        "altitude",
-    ):
+    for key in ("latitude", "longitude", "altitude"):
         if key not in point:
-            raise SystemExit(
-                f"轨迹点 {index} 缺少 {key}"
-            )
+            raise SystemExit(f"轨迹点 {index} 缺少 {key}")
 
 summary = data.get("summary", {})
 
 print("路线文件：", path)
-print("格式版本：", data.get("format_version"))
+print("格式版本：", format_version)
 print("轨迹点数：", len(waypoints))
 print(
     "轨迹长度：",
-    round(
-        float(summary.get("total_length", 0.0)),
-        3,
-    ),
+    round(float(summary.get("total_length", 0.0)), 3),
     "m",
 )
-print(
-    "origin：",
-    f"{values[0]:.10f},",
-    f"{values[1]:.10f},",
-    f"{values[2]:.3f}",
-)
-print(
-    "origin yaw：",
-    origin.get("yaw_deg", "未保存"),
-)
+print("origin yaw：", origin.get("yaw_deg", "未保存"))
 PY
 
-echo
-echo "[patrol] 检查底层节点..."
-
-NODES="$(ros2 node list 2>/dev/null || true)"
-
-if ! grep -Fxq \
-    "/smins200_tcp_demo" \
-    <<< "$NODES"; then
-
-    echo "[patrol] MINS200 未运行。"
-    echo "[patrol] 请先执行："
-    echo "  ./scripts/start_base.sh"
-    exit 1
-fi
-
-if ! grep -Fxq \
-    "/vehicle_interface_node" \
-    <<< "$NODES"; then
-
-    echo "[patrol] 底盘 CAN 节点未运行。"
-    echo "[patrol] 请先执行："
-    echo "  ./scripts/start_base.sh"
-    exit 1
-fi
-
-for node_name in \
-    /patrol_localization \
-    /patrol_route_recorder \
-    /patrol_entry_planner \
-    /patrol_entry_executor \
-    /patrol_route_follower \
-    /patrol_auto_command_mux \
-    /patrol_command_manager \
-    /patrol_mission_manager
-do
-    if grep -Fxq "$node_name" <<< "$NODES"; then
-        echo "[patrol] 检测到旧上层节点：$node_name"
-        echo "[patrol] 请先执行："
-        echo "  ./scripts/stop_all.sh"
-        echo "然后重新启动底层。"
-        exit 1
-    fi
-done
-
-ip -details link show can0 \
-    > "$RUN_DIR/can0.txt" \
-    2>&1 || true
-
-CAN_STATE="$(
-    awk '/can state / {
-        print $3
-        exit
-    }' "$RUN_DIR/can0.txt"
-)"
-
-case "$CAN_STATE" in
-    ERROR-ACTIVE)
-        echo "[patrol] can0：ERROR-ACTIVE"
-        ;;
-    ERROR-WARNING)
-        echo "[patrol] 警告：can0 当前为 ERROR-WARNING，临时允许低速复现。"
-        cat "$RUN_DIR/can0.txt"
-        ;;
-    *)
-        echo "[patrol] can0 状态不允许复现：${CAN_STATE:-UNKNOWN}"
-        cat "$RUN_DIR/can0.txt"
-        exit 1
-        ;;
-esac
-
-LAUNCH_PID=""
-KEEP_RUNNING=0
-
-stop_launch() {
-    if [ -z "$LAUNCH_PID" ]; then
-        return
-    fi
-
-    if ! kill -0 "$LAUNCH_PID" 2>/dev/null; then
-        return
-    fi
-
-    local pgid
-    pgid="$(
-        ps -o pgid= -p "$LAUNCH_PID" |
-        tr -d ' '
-    )"
-
-    kill -INT -- "-$pgid" 2>/dev/null || true
-    sleep 2
-
-    if kill -0 "$LAUNCH_PID" 2>/dev/null; then
-        kill -TERM -- "-$pgid" \
-            2>/dev/null || true
-    fi
+service_exists() {
+    timeout 3 ros2 service list \
+        2>/dev/null |
+        grep -Fxq "$1"
 }
+
+safe_stop() {
+    set +e
+
+    if service_exists "/patrol/mission/stop"; then
+        timeout 5 ros2 service call \
+            /patrol/mission/stop \
+            std_srvs/srv/Trigger \
+            "{}" \
+            >/dev/null 2>&1 || true
+    fi
+
+    if service_exists "/patrol/set_control_mode"; then
+        timeout 5 ros2 service call \
+            /patrol/set_control_mode \
+            patrol_interfaces/srv/SetControlMode \
+            "{mode: 0}" \
+            >/dev/null 2>&1 || true
+    fi
+
+    set -e
+}
+
+START_SUCCEEDED=0
 
 cleanup() {
     local exit_code=$?
 
     trap - EXIT INT TERM
-    set +e
 
-    if [ "$KEEP_RUNNING" -ne 1 ]; then
-        if ros2 service list 2>/dev/null |
-            grep -Fxq "/patrol/set_control_mode"; then
-
-            timeout 5 ros2 service call \
-                /patrol/set_control_mode \
-                patrol_interfaces/srv/SetControlMode \
-                "{mode: 0}" \
-                >/dev/null 2>&1 || true
-        fi
-
-        stop_launch
+    if [ "$START_SUCCEEDED" -ne 1 ]; then
+        safe_stop
     fi
 
     exit "$exit_code"
@@ -312,71 +207,180 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 
 echo
-echo "[patrol] 启动路线复现模块..."
+echo "[patrol] 检查底层节点..."
 
-setsid ros2 launch \
-    patrol_bringup \
-    replay_patrol.launch.py \
-    route_file:="$ROUTE_FILE" \
-    config_file:="$CONFIG_FILE" \
-    vehicle_command_topic:=/vehicle/command \
-    > "$LAUNCH_LOG" 2>&1 &
+NODES="$(ros2 node list 2>/dev/null || true)"
 
-LAUNCH_PID=$!
-echo "$LAUNCH_PID" > "$PID_FILE"
-
-wait_service() {
-    local service_name="$1"
-
-    for _ in $(seq 1 100); do
-        if ros2 service list 2>/dev/null |
-            grep -Fxq "$service_name"; then
-            return 0
-        fi
-
-        if ! kill -0 "$LAUNCH_PID" 2>/dev/null; then
-            return 1
-        fi
-
-        sleep 0.2
-    done
-
-    return 1
-}
-
-if ! wait_service "/patrol/set_control_mode"; then
-    echo "[patrol] 控制服务启动失败："
-    tail -100 "$LAUNCH_LOG"
+if ! grep -Fxq "/smins200_tcp_demo" <<< "$NODES"; then
+    echo "[patrol] MINS200 未运行。"
+    echo "请先执行："
+    echo "  ./scripts/start_base.sh"
     exit 1
 fi
 
-if ! wait_service "/patrol/mission/start"; then
-    echo "[patrol] 任务服务启动失败："
-    tail -100 "$LAUNCH_LOG"
+if ! grep -Fxq "/vehicle_interface_node" <<< "$NODES"; then
+    echo "[patrol] 底盘 CAN 节点未运行。"
+    echo "请先执行："
+    echo "  ./scripts/start_base.sh"
     exit 1
 fi
 
+ip -details link show can0 \
+    > "$RUN_DIR/can0.txt" \
+    2>&1 || true
+
+CAN_STATE="$(
+    awk '
+        /can state / {
+            print $3
+            exit
+        }
+    ' "$RUN_DIR/can0.txt"
+)"
+
+case "$CAN_STATE" in
+    ERROR-ACTIVE)
+        echo "[patrol] can0：ERROR-ACTIVE"
+        ;;
+    ERROR-WARNING)
+        echo "[patrol] 警告：can0 为 ERROR-WARNING，临时允许低速复现。"
+        ;;
+    *)
+        echo "[patrol] can0 状态不允许复现：${CAN_STATE:-UNKNOWN}"
+        cat "$RUN_DIR/can0.txt"
+        exit 1
+        ;;
+esac
+
+echo
+echo "[patrol] 启动或复用上层常驻运行时..."
+
+"$WS/scripts/start_runtime.sh" "$ROUTE_FILE" |
+    tee "$RUN_DIR/runtime_start.txt"
+
+for service_name in \
+    /patrol/set_control_mode \
+    /patrol/mission/start \
+    /patrol/mission/stop \
+    /patrol/mission/load_route
+do
+    if ! service_exists "$service_name"; then
+        echo "[patrol] 必要服务不可用：$service_name"
+        exit 1
+    fi
+done
+
+echo
+echo "[patrol] 停止上一任务并保持 STOP 模式..."
+safe_stop
+
+echo
+echo "[patrol] 动态加载路线..."
+
+LOAD_RESULT="$(
+    timeout 8 ros2 service call \
+        /patrol/mission/load_route \
+        patrol_interfaces/srv/LoadRoute \
+        "{route_file: '$ROUTE_FILE'}" \
+        2>&1
+)"
+
+echo "$LOAD_RESULT" |
+    tee "$RUN_DIR/load_route_result.txt"
+
+if ! grep -Eqi \
+    "success[=:][[:space:]]*(true|True)" \
+    <<< "$LOAD_RESULT"; then
+
+    echo "[patrol] 路线加载请求被拒绝。"
+    exit 1
+fi
+
+ROUTE_BASENAME="$(basename "$ROUTE_FILE")"
+ROUTE_LOAD_DONE=0
+
+echo "[patrol] 等待三个组件完成路线切换..."
+
+for _ in $(seq 1 100); do
+    timeout 1 ros2 topic echo \
+        /patrol/mission/status \
+        --once \
+        > "$RUN_DIR/mission_load_status.txt" \
+        2>&1 || true
+
+    if grep -Fq \
+        "route load failed:" \
+        "$RUN_DIR/mission_load_status.txt"; then
+
+        echo "[patrol] 路线协调加载失败："
+        cat "$RUN_DIR/mission_load_status.txt"
+        exit 1
+    fi
+
+    if grep -Fq \
+        "route loaded and ready: $ROUTE_BASENAME" \
+        "$RUN_DIR/mission_load_status.txt"; then
+
+        ROUTE_LOAD_DONE=1
+        break
+    fi
+
+    sleep 0.2
+done
+
+if [ "$ROUTE_LOAD_DONE" -ne 1 ]; then
+    echo "[patrol] 等待路线协调加载完成超时。"
+    cat "$RUN_DIR/mission_load_status.txt" \
+        2>/dev/null || true
+    exit 1
+fi
+
+for node_name in \
+    /patrol_mission_manager \
+    /patrol_entry_planner \
+    /patrol_route_follower
+do
+    parameter_name="route_file"
+
+    if [ "$node_name" = "/patrol_mission_manager" ]; then
+        parameter_name="current_route_file"
+    fi
+
+    VALUE="$(
+        ros2 param get \
+            "$node_name" \
+            "$parameter_name" \
+            2>/dev/null || true
+    )"
+
+    echo "$node_name：$VALUE" |
+        tee -a "$RUN_DIR/route_parameters.txt"
+
+    if ! grep -Fq "$ROUTE_FILE" <<< "$VALUE"; then
+        echo "[patrol] 节点路线参数不一致：$node_name"
+        exit 1
+    fi
+done
+
+sleep 0.5
+
+echo
 echo "[patrol] 等待真实定位有效..."
 
 LOCALIZATION_OK=0
 
 for _ in $(seq 1 120); do
-    if timeout 2 ros2 topic echo \
+    timeout 2 ros2 topic echo \
         /patrol/localization_status \
         --once \
         > "$RUN_DIR/localization_status.txt" \
-        2>&1; then
+        2>&1 || true
 
-        if grep -Eq \
-            "^[[:space:]]*valid:[[:space:]]*true" \
-            "$RUN_DIR/localization_status.txt"; then
+    if grep -Eq \
+        "^[[:space:]]*valid:[[:space:]]*true" \
+        "$RUN_DIR/localization_status.txt"; then
 
-            LOCALIZATION_OK=1
-            break
-        fi
-    fi
-
-    if ! kill -0 "$LAUNCH_PID" 2>/dev/null; then
+        LOCALIZATION_OK=1
         break
     fi
 
@@ -387,14 +391,8 @@ if [ "$LOCALIZATION_OK" -ne 1 ]; then
     echo "[patrol] 定位未达到有效状态："
     cat "$RUN_DIR/localization_status.txt" \
         2>/dev/null || true
-    echo
-    echo "[patrol] 任务不会启动。"
     exit 1
 fi
-
-echo
-echo "===== 当前定位 ====="
-cat "$RUN_DIR/localization_status.txt"
 
 read -r CURRENT_EAST CURRENT_NORTH < <(
     awk '
@@ -415,16 +413,30 @@ read -r CURRENT_EAST CURRENT_NORTH < <(
 if [ -z "${CURRENT_EAST:-}" ] ||
    [ -z "${CURRENT_NORTH:-}" ]; then
 
-    echo "[patrol] 无法读取当前 ENU 坐标，禁止开始巡迹。"
+    echo "[patrol] 无法读取当前 ENU 坐标。"
     exit 1
 fi
 
-MAX_ORIGIN_DISTANCE_M="${PATROL_MAX_ORIGIN_DISTANCE_M:-4.0}"
+MAX_ORIGIN_DISTANCE_M="$(
+    python3 - "$CONFIG_FILE" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+config = yaml.safe_load(
+    Path(sys.argv[1]).read_text(encoding="utf-8")
+)
+
+startup = config.get("startup", {})
+print(float(startup.get("maximum_origin_distance_m", 4.0)))
+PY
+)"
 
 ORIGIN_DISTANCE_M="$(
     python3 - \
         "$CURRENT_EAST" \
-        "$CURRENT_NORTH" <<'PY_DISTANCE'
+        "$CURRENT_NORTH" <<'PY'
 import math
 import sys
 
@@ -432,7 +444,7 @@ east = float(sys.argv[1])
 north = float(sys.argv[2])
 
 print(f"{math.hypot(east, north):.3f}")
-PY_DISTANCE
+PY
 )"
 
 echo
@@ -444,7 +456,7 @@ echo "允许距离  ：≤ $MAX_ORIGIN_DISTANCE_M m"
 
 if ! python3 - \
     "$ORIGIN_DISTANCE_M" \
-    "$MAX_ORIGIN_DISTANCE_M" <<'PY_CHECK'
+    "$MAX_ORIGIN_DISTANCE_M" <<'PY'
 import math
 import sys
 
@@ -459,16 +471,12 @@ valid = (
 )
 
 raise SystemExit(0 if valid else 1)
-PY_CHECK
+PY
 then
-    echo
     echo "[patrol] 当前车辆距离路线原点过远。"
-    echo "[patrol] 请先将车辆移动至路线原点附近。"
     echo "[patrol] 任务不会启动。"
     exit 1
 fi
-
-echo "[patrol] 原点距离检查通过。"
 
 ros2 topic info -v /vehicle/command \
     > "$RUN_DIR/vehicle_command_info.txt" \
@@ -513,30 +521,21 @@ if ! grep -q \
     exit 1
 fi
 
-ros2 service call \
-    /patrol/set_control_mode \
-    patrol_interfaces/srv/SetControlMode \
-    "{mode: 0}" \
-    > "$RUN_DIR/initial_stop.log" \
-    2>&1 || true
+safe_stop
 
-
-echo "[patrol] 巡迹参数已由统一配置加载："
-echo "  $CONFIG_FILE"
-
-
+echo
 echo "========================================"
 echo "路线复现准备完成"
 echo "========================================"
 echo "路线：$ROUTE_NAME"
-echo "文件：$ROUTE_FILE"
 echo
 echo "当前系统没有障碍物地图。"
 echo "Hybrid A* 可能规划倒车。"
 echo "必须确认车辆前后区域完全无障碍物。"
 echo
+
 if [ "$AUTO_CONFIRM" -eq 1 ]; then
-    echo "[patrol] --yes 已启用，安全检查通过后自动确认 START。"
+    echo "[patrol] --yes 已启用，安全检查通过后自动确认。"
     answer="START"
 else
     read -r -p \
@@ -552,7 +551,7 @@ fi
 echo "[patrol] 切换 AUTO 模式..."
 
 MODE_RESULT="$(
-    ros2 service call \
+    timeout 8 ros2 service call \
         /patrol/set_control_mode \
         patrol_interfaces/srv/SetControlMode \
         "{mode: 2}" \
@@ -575,7 +574,7 @@ sleep 0.5
 echo "[patrol] 启动自动任务..."
 
 MISSION_RESULT="$(
-    ros2 service call \
+    timeout 8 ros2 service call \
         /patrol/mission/start \
         std_srvs/srv/Trigger \
         "{}" \
@@ -590,32 +589,27 @@ if ! grep -Eqi \
     <<< "$MISSION_RESULT"; then
 
     echo "[patrol] 自动任务启动失败。"
-
-    ros2 service call \
-        /patrol/set_control_mode \
-        patrol_interfaces/srv/SetControlMode \
-        "{mode: 0}" \
-        >/dev/null 2>&1 || true
-
     exit 1
 fi
 
-KEEP_RUNNING=1
+START_SUCCEEDED=1
 
 echo
 echo "========================================"
 echo "指定路线复现已启动"
 echo "========================================"
 echo "路线：$ROUTE_NAME"
-echo "日志：$LAUNCH_LOG"
+echo "本次日志：$RUN_DIR"
 echo
-echo "查看状态："
-echo "  ./scripts/status.sh"
+echo "上层运行时保持常驻。"
 echo
-echo "停止任务："
+echo "停止当前任务："
 echo "  ./scripts/stop_mission.sh"
 echo
-echo "关闭全部："
+echo "再次启动其他路线："
+echo "  ./scripts/replay_route.sh 路线名称"
+echo
+echo "彻底关闭系统："
 echo "  ./scripts/stop_all.sh"
 
 trap - EXIT INT TERM

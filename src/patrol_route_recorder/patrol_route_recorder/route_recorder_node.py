@@ -12,6 +12,7 @@ import yaml
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path as NavPath
 from patrol_interfaces.msg import LocalizationStatus
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from std_srvs.srv import Trigger
 
@@ -565,7 +566,7 @@ def main(args=None) -> None:
 
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()

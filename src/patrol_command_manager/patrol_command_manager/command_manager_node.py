@@ -7,6 +7,7 @@ from typing import Optional
 import rclpy
 from patrol_interfaces.msg import ControlMode
 from patrol_interfaces.srv import SetControlMode
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from vehicle_can_msg.msg import VehicleCommand
 
@@ -356,7 +357,7 @@ def main(args=None) -> None:
 
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         if rclpy.ok():

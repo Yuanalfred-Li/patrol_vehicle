@@ -14,6 +14,7 @@ from geometry_msgs.msg import Pose, PoseStamped
 from nav_msgs.msg import Path as NavPath
 from patrol_interfaces.msg import EntryPath, LocalizationStatus
 from patrol_interfaces.srv import LoadRoute
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import (
@@ -1269,7 +1270,7 @@ def main(args=None) -> None:
 
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()

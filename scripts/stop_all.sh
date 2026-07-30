@@ -169,6 +169,11 @@ stop_process_group \
     "路线录制模块"
 
 stop_process_group \
+    "$LOGS_DIR/latest_runtime/runtime_launch.pid" \
+    'replay_patrol\.launch\.py|patrol_system\.launch\.py' \
+    "上层常驻运行时"
+
+stop_process_group \
     "$LOGS_DIR/latest_replay/replay_launch.pid" \
     'replay_patrol\.launch\.py|full_patrol\.launch\.py' \
     "路线复现模块"
@@ -179,6 +184,10 @@ pkill -INT -f \
 
 pkill -INT -f \
     '[r]os2 launch patrol_bringup replay_patrol.launch.py' \
+    2>/dev/null || true
+
+pkill -INT -f \
+    '[r]os2 launch patrol_bringup patrol_system.launch.py' \
     2>/dev/null || true
 
 pkill -INT -f \
