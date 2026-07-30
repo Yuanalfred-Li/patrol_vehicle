@@ -66,10 +66,12 @@ gnss_degraded:
   maximum_imu_age_sec: 0.5
   maximum_entry_steering_request: 80.0
   minimum_straight_segment_length_m: 4.0
+  maximum_straight_heading_change_deg: 5.0
 
   recovery_stable_sec: 1.0
   recovery_max_path_error_m: 1.0
   recovery_max_heading_error_deg: 15.0
+  recovery_max_progress_jump_m: 2.0
 
   # 超过保持时间停车后，不允许GNSS恢复时自动重新运动。
   auto_resume_after_stop: false

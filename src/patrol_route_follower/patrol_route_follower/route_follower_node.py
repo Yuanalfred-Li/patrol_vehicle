@@ -22,6 +22,15 @@ from rclpy.qos import (
 from std_srvs.srv import SetBool
 from vehicle_can_msg.msg import VehicleCommand
 
+from patrol_route_follower.gnss_hold_controller import (
+    GnssHoldController,
+    HOLD,
+    HoldConfig,
+    NORMAL,
+    RESUME,
+    STOP,
+)
+
 
 def normalize_angle(angle: float) -> float:
     return math.atan2(math.sin(angle), math.cos(angle))
@@ -327,6 +336,71 @@ class PatrolRouteFollower(Node):
             0.50,
         )
 
+        self.declare_parameter(
+            'gnss_degraded_enabled',
+            False,
+        )
+        self.declare_parameter(
+            'gnss_weak_debounce_sec',
+            0.3,
+        )
+        self.declare_parameter(
+            'gnss_maximum_hold_sec',
+            3.0,
+        )
+        self.declare_parameter(
+            'gnss_hold_speed_rpm',
+            8.0,
+        )
+        self.declare_parameter(
+            'gnss_maximum_heading_error_deg',
+            8.0,
+        )
+        self.declare_parameter(
+            'gnss_heading_control_kp',
+            8.0,
+        )
+        self.declare_parameter(
+            'gnss_maximum_steering_request',
+            80.0,
+        )
+        self.declare_parameter(
+            'gnss_maximum_imu_age_sec',
+            0.5,
+        )
+        self.declare_parameter(
+            'gnss_maximum_entry_steering_request',
+            80.0,
+        )
+        self.declare_parameter(
+            'gnss_minimum_straight_segment_length_m',
+            4.0,
+        )
+        self.declare_parameter(
+            'gnss_maximum_straight_heading_change_deg',
+            5.0,
+        )
+        self.declare_parameter(
+            'gnss_recovery_stable_sec',
+            1.0,
+        )
+        self.declare_parameter(
+            'gnss_recovery_max_path_error_m',
+            1.0,
+        )
+        self.declare_parameter(
+            'gnss_recovery_max_heading_error_deg',
+            15.0,
+        )
+        self.declare_parameter(
+            'gnss_recovery_max_progress_jump_m',
+            2.0,
+        )
+        self.declare_parameter(
+            'gnss_auto_resume_after_stop',
+            False,
+        )
+
         self.route_file = Path(
             str(self.get_parameter('route_file').value)
         )
@@ -351,6 +425,83 @@ class PatrolRouteFollower(Node):
         self.progress_initialized = False
         self.progress_s = 0.0
         self.last_log_time = 0.0
+        self.last_hold_status_time = 0.0
+        self.last_hold_status_state = ''
+
+        self.gnss_hold = GnssHoldController(
+            HoldConfig(
+                enabled=bool(
+                    self.get_parameter(
+                        'gnss_degraded_enabled'
+                    ).value
+                ),
+                weak_debounce_sec=float(
+                    self.get_parameter(
+                        'gnss_weak_debounce_sec'
+                    ).value
+                ),
+                maximum_hold_sec=float(
+                    self.get_parameter(
+                        'gnss_maximum_hold_sec'
+                    ).value
+                ),
+                hold_speed_rpm=float(
+                    self.get_parameter(
+                        'gnss_hold_speed_rpm'
+                    ).value
+                ),
+                maximum_heading_error_deg=float(
+                    self.get_parameter(
+                        'gnss_maximum_heading_error_deg'
+                    ).value
+                ),
+                heading_control_kp=float(
+                    self.get_parameter(
+                        'gnss_heading_control_kp'
+                    ).value
+                ),
+                maximum_steering_request=float(
+                    self.get_parameter(
+                        'gnss_maximum_steering_request'
+                    ).value
+                ),
+                maximum_entry_steering_request=float(
+                    self.get_parameter(
+                        'gnss_maximum_entry_steering_request'
+                    ).value
+                ),
+                minimum_straight_segment_length_m=float(
+                    self.get_parameter(
+                        'gnss_minimum_straight_segment_length_m'
+                    ).value
+                ),
+                recovery_stable_sec=float(
+                    self.get_parameter(
+                        'gnss_recovery_stable_sec'
+                    ).value
+                ),
+                recovery_max_path_error_m=float(
+                    self.get_parameter(
+                        'gnss_recovery_max_path_error_m'
+                    ).value
+                ),
+                recovery_max_heading_error_deg=float(
+                    self.get_parameter(
+                        'gnss_recovery_max_heading_error_deg'
+                    ).value
+                ),
+                recovery_max_progress_jump_m=float(
+                    self.get_parameter(
+                        'gnss_recovery_max_progress_jump_m'
+                    ).value
+                ),
+                auto_resume_after_stop=bool(
+                    self.get_parameter(
+                        'gnss_auto_resume_after_stop'
+                    ).value
+                ),
+            )
+        )
 
         self.points: List[Dict[str, float]] = []
         self.cumulative_s: List[float] = []
@@ -638,6 +789,9 @@ class PatrolRouteFollower(Node):
         self.progress_initialized = False
         self.progress_s = 0.0
         self.last_log_time = 0.0
+        self.last_hold_status_time = 0.0
+        self.last_hold_status_state = ''
+        self.gnss_hold.reset()
 
         self.publish_stop()
         self.publish_route_path()
@@ -680,6 +834,8 @@ class PatrolRouteFollower(Node):
         if not request.data:
             self.enabled = False
             self.progress_initialized = False
+            self.gnss_hold.reset()
+            self.last_hold_status_state = ''
             self.publish_stop()
 
             response.success = True
@@ -759,6 +915,9 @@ class PatrolRouteFollower(Node):
 
         self.progress_s = projection['s']
         self.progress_initialized = True
+        self.gnss_hold.reset()
+        self.last_hold_status_time = 0.0
+        self.last_hold_status_state = ''
         self.enabled = True
 
         response.success = True
@@ -788,17 +947,184 @@ class PatrolRouteFollower(Node):
             self.publish_stop()
             return
 
-        reason = self.localization_problem()
-        if reason is not None:
-            self.safety_stop(reason)
+        status_reason = (
+            self.localization_status_problem()
+        )
+
+        if status_reason is not None:
+            self.safety_stop(status_reason)
             return
 
+        assert self.latest_status is not None
+        status = self.latest_status
+        now = time.monotonic()
+
+        #######################################################################
+        # GNSS恢复阶段
+        #######################################################################
+
+        if status.valid:
+            if self.gnss_hold.state != NORMAL:
+                pose_reason = self.pose_problem()
+
+                if pose_reason is not None:
+                    decision = self.gnss_hold.update_bad(
+                        now=now,
+                        imu_heading_deg=float(
+                            status.yaw_deg
+                        ),
+                    )
+                    self.apply_hold_decision(
+                        decision
+                    )
+                    return
+
+                recovery = (
+                    self.current_route_context()
+                )
+
+                decision = self.gnss_hold.update_good(
+                    now=now,
+                    imu_heading_deg=float(
+                        status.yaw_deg
+                    ),
+                    recovery_path_error_m=float(
+                        recovery['path_error']
+                    ),
+                    recovery_heading_error_deg=float(
+                        recovery['heading_error_deg']
+                    ),
+                    recovered_progress_s=float(
+                        recovery['projection']['s']
+                    ),
+                )
+
+                if decision.action != RESUME:
+                    self.apply_hold_decision(
+                        decision
+                    )
+                    return
+
+                if (
+                    decision.recovered_progress_s
+                    is not None
+                ):
+                    self.progress_s = max(
+                        self.progress_s,
+                        float(
+                            decision.recovered_progress_s
+                        ),
+                    )
+
+                self.last_hold_status_state = ''
+                self.publish_status(
+                    TaskStatus.RUNNING,
+                    (
+                        'GNSS recovery validated; '
+                        'normal route following resumed'
+                    ),
+                    self.route_progress(),
+                    task=(
+                        'route_following/'
+                        'GNSS_NORMAL'
+                    ),
+                )
+
+            pose_reason = self.pose_problem()
+
+            if pose_reason is not None:
+                self.safety_stop(pose_reason)
+                return
+
+            self.run_normal_control()
+            return
+
+        #######################################################################
+        # 定位无效：判断能否进入短时IMU航向保持
+        #######################################################################
+
+        if not self.gnss_hold.config.enabled:
+            self.safety_stop(
+                f'localization invalid: '
+                f'{status.reason}'
+            )
+            return
+
+        if not bool(
+            status.gnss_degraded_candidate
+        ):
+            self.safety_stop(
+                f'localization invalid and not '
+                f'degradable: {status.reason}'
+            )
+            return
+
+        maximum_imu_age = float(
+            self.get_parameter(
+                'gnss_maximum_imu_age_sec'
+            ).value
+        )
+
+        if (
+            not math.isfinite(
+                float(status.imu_age_sec)
+            )
+            or float(status.imu_age_sec)
+            > maximum_imu_age
+        ):
+            self.safety_stop(
+                'IMU is too old for GNSS heading '
+                f'hold: {status.imu_age_sec:.2f}s'
+            )
+            return
+
+        imu_heading = float(status.yaw_deg)
+
+        if self.gnss_hold.state == NORMAL:
+            pose_reason = self.pose_problem()
+
+            if pose_reason is not None:
+                self.safety_stop(
+                    'cannot begin GNSS heading hold: '
+                    + pose_reason
+                )
+                return
+
+            context = self.current_route_context()
+
+            decision = self.gnss_hold.begin(
+                now=now,
+                target_heading_rad=float(
+                    context['route_heading']
+                ),
+                pose_yaw_rad=float(
+                    context['vehicle_yaw']
+                ),
+                imu_heading_deg=imu_heading,
+                straight_remaining_m=float(
+                    context['straight_remaining']
+                ),
+                frozen_progress_s=float(
+                    self.progress_s
+                ),
+            )
+        else:
+            decision = self.gnss_hold.update_bad(
+                now=now,
+                imu_heading_deg=imu_heading,
+            )
+
+        self.apply_hold_decision(decision)
+
+    def run_normal_control(self) -> None:
         assert self.latest_pose is not None
 
         pose = self.latest_pose.pose
         x = float(pose.position.x)
         y = float(pose.position.y)
-        yaw = self.quaternion_to_yaw(pose.orientation)
+        yaw = self.quaternion_to_yaw(
+            pose.orientation
+        )
 
         projection = self.project_to_route(x, y)
 
@@ -835,7 +1161,9 @@ class PatrolRouteFollower(Node):
             y - final_point['y'],
         )
         final_tolerance = float(
-            self.get_parameter('final_tolerance').value
+            self.get_parameter(
+                'final_tolerance'
+            ).value
         )
 
         if (
@@ -843,9 +1171,12 @@ class PatrolRouteFollower(Node):
             and final_distance <= final_tolerance
         ):
             self.enabled = False
+            self.gnss_hold.reset()
             self.publish_stop()
 
-            message = 'route completed; vehicle stopped'
+            message = (
+                'route completed; vehicle stopped'
+            )
 
             self.publish_status(
                 TaskStatus.SUCCEEDED,
@@ -886,7 +1217,9 @@ class PatrolRouteFollower(Node):
         )
 
         wheelbase = float(
-            self.get_parameter('wheelbase').value
+            self.get_parameter(
+                'wheelbase'
+            ).value
         )
 
         steering_angle = math.atan2(
@@ -927,19 +1260,21 @@ class PatrolRouteFollower(Node):
         else:
             steering_request = 0.0
 
-        speed_rpm = self.calculate_speed(remaining)
+        speed_rpm = self.calculate_speed(
+            remaining
+        )
 
         command = VehicleCommand()
         command.header.stamp = (
             self.get_clock().now().to_msg()
         )
         command.header.frame_id = self.frame_id
-
-        command.target_speed_rpm = float(speed_rpm)
-        command.target_steering_angle_deg = float(
-            steering_request
+        command.target_speed_rpm = float(
+            speed_rpm
         )
-
+        command.target_steering_angle_deg = (
+            float(steering_request)
+        )
         command.brake_pedal = 0
         command.parking_brake = 1
         command.control_mode = 1
@@ -949,12 +1284,9 @@ class PatrolRouteFollower(Node):
         self.command_pub.publish(command)
 
         now = time.monotonic()
+
         if now - self.last_log_time >= 1.0:
-            progress = (
-                self.progress_s / self.total_length
-                if self.total_length > 1.0e-6
-                else 0.0
-            )
+            progress = self.route_progress()
 
             self.publish_status(
                 TaskStatus.RUNNING,
@@ -975,10 +1307,205 @@ class PatrolRouteFollower(Node):
                 f'steering={steering_request:.1f}'
             )
 
-    def localization_problem(self) -> Optional[str]:
-        if self.latest_pose is None:
-            return 'no pose'
+    def apply_hold_decision(
+        self,
+        decision,
+    ) -> None:
+        if decision.action == STOP:
+            self.safety_stop(
+                'GNSS heading hold rejected: '
+                + str(decision.reason)
+            )
+            return
 
+        if decision.action == RESUME:
+            return
+
+        if decision.action != HOLD:
+            self.safety_stop(
+                'unknown GNSS hold action: '
+                + str(decision.action)
+            )
+            return
+
+        self.publish_hold_command(
+            decision.speed_rpm,
+            decision.steering_request,
+        )
+
+        now = time.monotonic()
+        state_changed = (
+            decision.state
+            != self.last_hold_status_state
+        )
+
+        if (
+            state_changed
+            or now - self.last_hold_status_time
+            >= 0.20
+        ):
+            self.publish_status(
+                TaskStatus.RUNNING,
+                (
+                    f'{decision.state}: '
+                    f'remaining='
+                    f'{decision.remaining_sec:.2f}s, '
+                    f'heading_error='
+                    f'{decision.heading_error_deg:.1f}deg, '
+                    f'speed={decision.speed_rpm:.1f}rpm, '
+                    f'steering='
+                    f'{decision.steering_request:.1f}'
+                ),
+                self.route_progress(),
+                task=(
+                    'route_following/'
+                    + str(decision.state)
+                ),
+            )
+
+            self.last_hold_status_time = now
+            self.last_hold_status_state = (
+                str(decision.state)
+            )
+
+    def publish_hold_command(
+        self,
+        speed_rpm: float,
+        steering_request: float,
+    ) -> None:
+        command = VehicleCommand()
+        command.header.stamp = (
+            self.get_clock().now().to_msg()
+        )
+        command.header.frame_id = self.frame_id
+        command.target_speed_rpm = float(
+            speed_rpm
+        )
+        command.target_steering_angle_deg = (
+            float(steering_request)
+        )
+        command.brake_pedal = 0
+        command.parking_brake = 1
+        command.control_mode = 1
+        command.brake_light = False
+        command.emergency_stop = False
+
+        self.command_pub.publish(command)
+
+    def current_route_context(
+        self,
+    ) -> Dict[str, object]:
+        assert self.latest_pose is not None
+
+        pose = self.latest_pose.pose
+        x = float(pose.position.x)
+        y = float(pose.position.y)
+
+        projection = self.project_to_route(x, y)
+        segment_index = int(
+            projection['segment']
+        )
+        route_heading = self.segment_heading(
+            segment_index
+        )
+        vehicle_yaw = self.quaternion_to_yaw(
+            pose.orientation
+        )
+        heading_error_deg = math.degrees(
+            normalize_angle(
+                vehicle_yaw - route_heading
+            )
+        )
+
+        return {
+            'projection': projection,
+            'path_error': float(
+                projection['distance']
+            ),
+            'route_heading': route_heading,
+            'vehicle_yaw': vehicle_yaw,
+            'heading_error_deg':
+                heading_error_deg,
+            'straight_remaining':
+                self.straight_remaining(
+                    projection,
+                ),
+        }
+
+    def segment_heading(
+        self,
+        index: int,
+    ) -> float:
+        first = self.points[index]
+        second = self.points[index + 1]
+
+        return math.atan2(
+            second['y'] - first['y'],
+            second['x'] - first['x'],
+        )
+
+    def straight_remaining(
+        self,
+        projection: Dict[str, float],
+    ) -> float:
+        index = int(projection['segment'])
+        base_heading = self.segment_heading(
+            index
+        )
+
+        remaining = max(
+            0.0,
+            self.cumulative_s[index + 1]
+            - float(projection['s']),
+        )
+
+        maximum_change = math.radians(
+            abs(float(
+                self.get_parameter(
+                    'gnss_maximum_straight_heading_change_deg'
+                ).value
+            ))
+        )
+
+        for segment in range(
+            index + 1,
+            len(self.points) - 1,
+        ):
+            heading = self.segment_heading(
+                segment
+            )
+            difference = abs(
+                normalize_angle(
+                    heading - base_heading
+                )
+            )
+
+            if difference > maximum_change:
+                break
+
+            remaining += (
+                self.cumulative_s[segment + 1]
+                - self.cumulative_s[segment]
+            )
+
+        return float(remaining)
+
+    def route_progress(self) -> float:
+        if self.total_length <= 1.0e-6:
+            return 0.0
+
+        return max(
+            0.0,
+            min(
+                1.0,
+                self.progress_s
+                / self.total_length,
+            ),
+        )
+
+    def localization_status_problem(
+        self,
+    ) -> Optional[str]:
         if self.latest_status is None:
             return 'no localization status'
 
@@ -987,22 +1514,45 @@ class PatrolRouteFollower(Node):
                 'maximum_localization_age_sec'
             ).value
         )
-
-        pose_age = (
-            time.monotonic() - self.pose_receive_time
-        )
         status_age = (
-            time.monotonic() - self.status_receive_time
+            time.monotonic()
+            - self.status_receive_time
+        )
+
+        if status_age > maximum_age:
+            return (
+                'localization status timeout: '
+                f'{status_age:.2f}s'
+            )
+
+        return None
+
+    def pose_problem(self) -> Optional[str]:
+        if self.latest_pose is None:
+            return 'no pose'
+
+        maximum_age = float(
+            self.get_parameter(
+                'maximum_localization_age_sec'
+            ).value
+        )
+        pose_age = (
+            time.monotonic()
+            - self.pose_receive_time
         )
 
         if pose_age > maximum_age:
             return f'pose timeout: {pose_age:.2f}s'
 
-        if status_age > maximum_age:
-            return (
-                f'localization status timeout: '
-                f'{status_age:.2f}s'
-            )
+        return None
+
+    def localization_problem(self) -> Optional[str]:
+        reason = self.localization_status_problem()
+
+        if reason is not None:
+            return reason
+
+        assert self.latest_status is not None
 
         if not self.latest_status.valid:
             return (
@@ -1010,7 +1560,7 @@ class PatrolRouteFollower(Node):
                 f'{self.latest_status.reason}'
             )
 
-        return None
+        return self.pose_problem()
 
     def project_to_route(
         self,
@@ -1169,6 +1719,7 @@ class PatrolRouteFollower(Node):
         state: int,
         message: str,
         progress: float,
+        task: str = 'route_following',
     ) -> None:
         status = TaskStatus()
         status.header.stamp = (
@@ -1176,7 +1727,7 @@ class PatrolRouteFollower(Node):
         )
         status.header.frame_id = self.frame_id
         status.state = int(state)
-        status.task = 'route_following'
+        status.task = str(task)
         status.message = str(message)
         status.progress = float(max(
             0.0,

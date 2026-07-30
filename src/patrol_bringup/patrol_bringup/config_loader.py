@@ -92,6 +92,26 @@ def _number(
     return number
 
 
+
+
+def _boolean(
+    section: Mapping[str, Any],
+    key: str,
+) -> bool:
+    if key not in section:
+        raise PatrolConfigError(
+            f'配置缺少参数：{key}'
+        )
+
+    value = section[key]
+
+    if not isinstance(value, bool):
+        raise PatrolConfigError(
+            f'参数 {key} 必须是布尔值'
+        )
+
+    return value
+
 def load_patrol_config(
     config_file: str,
 ) -> Dict[str, Any]:
@@ -193,6 +213,15 @@ def load_patrol_config(
             '不能大于 maximum_speed_rpm'
         )
 
+    _boolean(
+        degraded,
+        'enabled',
+    )
+    auto_resume = _boolean(
+        degraded,
+        'auto_resume_after_stop',
+    )
+
     weak_debounce = _number(
         degraded,
         'weak_debounce_sec',
@@ -210,9 +239,76 @@ def load_patrol_config(
         strictly_positive=True,
     )
 
+    maximum_heading_error = _number(
+        degraded,
+        'maximum_heading_error_deg',
+        strictly_positive=True,
+        maximum=45.0,
+    )
+    _number(
+        degraded,
+        'heading_control_kp',
+        strictly_positive=True,
+    )
+    maximum_hold_steering = _number(
+        degraded,
+        'maximum_steering_request',
+        strictly_positive=True,
+    )
+    maximum_entry_steering = _number(
+        degraded,
+        'maximum_entry_steering_request',
+        minimum=0.0,
+    )
+    _number(
+        degraded,
+        'maximum_imu_age_sec',
+        strictly_positive=True,
+        maximum=2.0,
+    )
+    _number(
+        degraded,
+        'minimum_straight_segment_length_m',
+        strictly_positive=True,
+    )
+    _number(
+        degraded,
+        'maximum_straight_heading_change_deg',
+        minimum=0.0,
+        maximum=15.0,
+    )
+
+    recovery_stable = _number(
+        degraded,
+        'recovery_stable_sec',
+        strictly_positive=True,
+    )
+    _number(
+        degraded,
+        'recovery_max_path_error_m',
+        strictly_positive=True,
+    )
+    recovery_heading_error = _number(
+        degraded,
+        'recovery_max_heading_error_deg',
+        strictly_positive=True,
+        maximum=45.0,
+    )
+    _number(
+        degraded,
+        'recovery_max_progress_jump_m',
+        strictly_positive=True,
+    )
+
     if weak_debounce >= maximum_hold:
         raise PatrolConfigError(
             'weak_debounce_sec 必须小于 '
+            'maximum_hold_sec'
+        )
+
+    if recovery_stable >= maximum_hold:
+        raise PatrolConfigError(
+            'recovery_stable_sec 必须小于 '
             'maximum_hold_sec'
         )
 
@@ -221,9 +317,32 @@ def load_patrol_config(
             '弱GNSS保持速度不能高于正常最大巡迹速度'
         )
 
+    if maximum_entry_steering > maximum_hold_steering:
+        raise PatrolConfigError(
+            'maximum_entry_steering_request '
+            '不能大于 maximum_steering_request'
+        )
+
+    if recovery_heading_error < maximum_heading_error:
+        raise PatrolConfigError(
+            'recovery_max_heading_error_deg '
+            '不能小于 maximum_heading_error_deg'
+        )
+
+    if auto_resume:
+        raise PatrolConfigError(
+            '当前不支持 '
+            'auto_resume_after_stop: true'
+        )
+
     command_maximum_speed = _number(
         command,
         'maximum_speed_rpm',
+        strictly_positive=True,
+    )
+    command_maximum_steering = _number(
+        command,
+        'maximum_steering_request',
         strictly_positive=True,
     )
 
@@ -238,6 +357,12 @@ def load_patrol_config(
         raise PatrolConfigError(
             'command_manager.maximum_speed_rpm '
             '低于其他模块所需速度'
+        )
+
+    if command_maximum_steering < maximum_hold_steering:
+        raise PatrolConfigError(
+            'command_manager.maximum_steering_request '
+            '低于GNSS保持所需转向请求'
         )
 
     return dict(data)

@@ -142,6 +142,48 @@ def launch_setup(context):
                 'final_tolerance',
         },
     )
+    gnss_hold_parameters = section_parameters(
+        config,
+        'gnss_degraded',
+        rename={
+            'enabled':
+                'gnss_degraded_enabled',
+            'weak_debounce_sec':
+                'gnss_weak_debounce_sec',
+            'maximum_hold_sec':
+                'gnss_maximum_hold_sec',
+            'hold_speed_rpm':
+                'gnss_hold_speed_rpm',
+            'maximum_heading_error_deg':
+                'gnss_maximum_heading_error_deg',
+            'heading_control_kp':
+                'gnss_heading_control_kp',
+            'maximum_steering_request':
+                'gnss_maximum_steering_request',
+            'maximum_imu_age_sec':
+                'gnss_maximum_imu_age_sec',
+            'maximum_entry_steering_request':
+                'gnss_maximum_entry_steering_request',
+            'minimum_straight_segment_length_m':
+                'gnss_minimum_straight_segment_length_m',
+            'maximum_straight_heading_change_deg':
+                'gnss_maximum_straight_heading_change_deg',
+            'recovery_stable_sec':
+                'gnss_recovery_stable_sec',
+            'recovery_max_path_error_m':
+                'gnss_recovery_max_path_error_m',
+            'recovery_max_heading_error_deg':
+                'gnss_recovery_max_heading_error_deg',
+            'recovery_max_progress_jump_m':
+                'gnss_recovery_max_progress_jump_m',
+            'auto_resume_after_stop':
+                'gnss_auto_resume_after_stop',
+        },
+    )
+
+    route_follower_parameters.update(
+        gnss_hold_parameters
+    )
     route_follower_parameters['route_file'] = route_file
 
     auto_mux_parameters = section_parameters(
