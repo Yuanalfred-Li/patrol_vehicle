@@ -372,66 +372,138 @@ class PatrolLocalization(Node):
         now_monotonic = time.monotonic()
         reasons = []
 
+        maximum_age = max(
+            0.01,
+            float(
+                self.get_parameter(
+                    'maximum_data_age_sec'
+                ).value
+            ),
+        )
+
+        status = LocalizationStatus()
+        status.header.stamp = (
+            self.get_clock().now().to_msg()
+        )
+        status.header.frame_id = self.frame_id
+
+        status.east = math.nan
+        status.north = math.nan
+
+        gps_age = 1.0e9
+        imu_age = 1.0e9
+
+        gps_data_valid = False
+        imu_data_valid = False
+        origin_valid = False
+        satellites_ok = False
+        geometry_valid = False
+
+        #######################################################################
+        # 路线原点
+        #######################################################################
+
         origin_set = bool(
             self.get_parameter('origin_set').value
         )
-        maximum_age = float(
-            self.get_parameter('maximum_data_age_sec').value
+
+        origin_lat = float(
+            self.get_parameter(
+                'origin_latitude'
+            ).value
         )
-
-        if self.latest_gps is None:
-            reasons.append('no GPS message')
-
-        if self.latest_imu is None:
-            reasons.append('no IMU status message')
+        origin_lon = float(
+            self.get_parameter(
+                'origin_longitude'
+            ).value
+        )
+        origin_alt = float(
+            self.get_parameter(
+                'origin_altitude'
+            ).value
+        )
 
         if not origin_set:
             reasons.append('origin is not configured')
+        elif not all(
+            math.isfinite(value)
+            for value in (
+                origin_lat,
+                origin_lon,
+                origin_alt,
+            )
+        ):
+            reasons.append(
+                'origin contains non-finite value'
+            )
+        elif not -90.0 <= origin_lat <= 90.0:
+            reasons.append(
+                'origin latitude is out of range'
+            )
+        elif not -180.0 <= origin_lon <= 180.0:
+            reasons.append(
+                'origin longitude is out of range'
+            )
+        else:
+            origin_valid = True
 
-        if self.latest_gps is not None:
-            gps_age = now_monotonic - self.gps_receive_time
-            if gps_age > maximum_age:
-                reasons.append(
-                    f'GPS data timeout: {gps_age:.2f}s'
-                )
+        #######################################################################
+        # GPS数据
+        #######################################################################
 
-        if self.latest_imu is not None:
-            imu_age = now_monotonic - self.imu_receive_time
-            if imu_age > maximum_age:
-                reasons.append(
-                    f'IMU data timeout: {imu_age:.2f}s'
-                )
-
-        status = LocalizationStatus()
-        status.header.stamp = self.get_clock().now().to_msg()
-        status.header.frame_id = self.frame_id
-
-        east = math.nan
-        north = math.nan
-        up = math.nan
-
-        if self.latest_gps is not None:
+        if self.latest_gps is None:
+            reasons.append('no GPS message')
+        else:
             gps = self.latest_gps
+            gps_age = max(
+                0.0,
+                now_monotonic - self.gps_receive_time,
+            )
 
-            status.gps_status = int(gps.status.status)
+            status.gps_status = int(
+                gps.status.status
+            )
             status.latitude = float(gps.latitude)
             status.longitude = float(gps.longitude)
             status.altitude = float(gps.altitude)
 
-            values = [
-                gps.latitude,
-                gps.longitude,
-                gps.altitude,
-            ]
+            gps_reasons = []
 
-            if not all(math.isfinite(v) for v in values):
-                reasons.append('GPS contains non-finite value')
+            if gps_age > maximum_age:
+                gps_reasons.append(
+                    f'GPS data timeout: '
+                    f'{gps_age:.2f}s'
+                )
 
-            if not (-90.0 <= gps.latitude <= 90.0):
-                reasons.append('GPS latitude out of range')
+            if not all(
+                math.isfinite(value)
+                for value in (
+                    gps.latitude,
+                    gps.longitude,
+                    gps.altitude,
+                )
+            ):
+                gps_reasons.append(
+                    'GPS contains non-finite value'
+                )
 
-            if not (-180.0 <= gps.longitude <= 180.0):
-                reasons.append('GPS longitude out of range')
+            if not (
+                -90.0
+                <= float(gps.latitude)
+                <= 90.0
+            ):
+                gps_reasons.append(
+                    'GPS latitude is out of range'
+                )
+
+            if not (
+                -180.0
+                <= float(gps.longitude)
+                <= 180.0
+            ):
+                gps_reasons.append(
+                    'GPS longitude is out of range'
+                )
 
             accept_negative = bool(
                 self.get_parameter(
@@ -439,127 +511,192 @@ class PatrolLocalization(Node):
                 ).value
             )
 
-            if gps.status.status < 0 and not accept_negative:
-                reasons.append(
+            if (
+                int(gps.status.status) < 0
+                and not accept_negative
+            ):
+                gps_reasons.append(
                     f'NavSatFix status invalid: '
                     f'{gps.status.status}'
                 )
 
+            gps_data_valid = not gps_reasons
+            reasons.extend(gps_reasons)
 
-        if self.latest_imu is not None:
+        #######################################################################
+        # IMU数据
+        #######################################################################
+
+        if self.latest_imu is None:
+            reasons.append('no IMU status message')
+        else:
             imu = self.latest_imu
+            imu_age = max(
+                0.0,
+                now_monotonic - self.imu_receive_time,
+            )
 
             status.nsv1 = int(imu.nsv1)
             status.nsv2 = int(imu.nsv2)
             status.yaw_deg = float(imu.yaw)
+            status.nav_st = int(imu.nav_st)
+
+            imu_reasons = []
+
+            if imu_age > maximum_age:
+                imu_reasons.append(
+                    f'IMU data timeout: '
+                    f'{imu_age:.2f}s'
+                )
 
             if not math.isfinite(float(imu.yaw)):
-                reasons.append('IMU yaw is not finite')
+                imu_reasons.append(
+                    'IMU yaw is not finite'
+                )
+
+            imu_data_valid = not imu_reasons
+            reasons.extend(imu_reasons)
 
             minimum_nsv1 = int(
-                self.get_parameter('minimum_nsv1').value
+                self.get_parameter(
+                    'minimum_nsv1'
+                ).value
             )
             minimum_nsv2 = int(
-                self.get_parameter('minimum_nsv2').value
+                self.get_parameter(
+                    'minimum_nsv2'
+                ).value
             )
 
-            if int(imu.nsv1) < minimum_nsv1:
+            nsv1_ok = (
+                int(imu.nsv1) >= minimum_nsv1
+            )
+            nsv2_ok = (
+                int(imu.nsv2) >= minimum_nsv2
+            )
+
+            satellites_ok = nsv1_ok and nsv2_ok
+
+            if not nsv1_ok:
                 reasons.append(
                     f'nsv1 too low: {imu.nsv1}'
                 )
 
-            if int(imu.nsv2) < minimum_nsv2:
+            if not nsv2_ok:
                 reasons.append(
                     f'nsv2 too low: {imu.nsv2}'
                 )
 
-        if not reasons:
+        #######################################################################
+        # GNSS质量与局部坐标
+        #######################################################################
+
+        gnss_quality_ok = (
+            gps_data_valid
+            and satellites_ok
+        )
+
+        east = math.nan
+        north = math.nan
+        up = math.nan
+
+        if origin_valid and gps_data_valid:
             assert self.latest_gps is not None
-            assert self.latest_imu is not None
 
-            origin_lat = float(
-                self.get_parameter(
-                    'origin_latitude'
-                ).value
-            )
-            origin_lon = float(
-                self.get_parameter(
-                    'origin_longitude'
-                ).value
-            )
-            origin_alt = float(
-                self.get_parameter(
-                    'origin_altitude'
-                ).value
-            )
-
-            origin_values = (
+            east, north, up = geodetic_to_enu(
+                self.latest_gps.latitude,
+                self.latest_gps.longitude,
+                self.latest_gps.altitude,
                 origin_lat,
                 origin_lon,
                 origin_alt,
             )
 
-            if not all(
+            geometry_valid = all(
                 math.isfinite(value)
-                for value in origin_values
-            ):
-                reasons.append(
-                    'origin contains non-finite value'
-                )
-            elif not -90.0 <= origin_lat <= 90.0:
-                reasons.append(
-                    'origin latitude out of range'
-                )
-            elif not -180.0 <= origin_lon <= 180.0:
-                reasons.append(
-                    'origin longitude out of range'
-                )
-            else:
-                east, north, up = geodetic_to_enu(
-                    self.latest_gps.latitude,
-                    self.latest_gps.longitude,
-                    self.latest_gps.altitude,
-                    origin_lat,
-                    origin_lon,
-                    origin_alt,
-                )
-
-                if not all(math.isfinite(value) for value in (
+                for value in (
                     east,
                     north,
                     up,
-                )):
-                    reasons.append(
-                        'ENU conversion produced '
-                        'non-finite value'
-                    )
-                else:
-                    status.east = east
-                    status.north = north
+                )
+            )
 
-        status.valid = len(reasons) == 0
+            if not geometry_valid:
+                reasons.append(
+                    'ENU conversion produced '
+                    'non-finite value'
+                )
+
+        # 仅当原点和IMU正常，而无效原因属于GNSS质量时，
+        # 才允许上层考虑短时航向保持。
+        degraded_candidate = (
+            origin_valid
+            and imu_data_valid
+            and not gnss_quality_ok
+        )
+
+        status.gps_data_valid = bool(
+            gps_data_valid
+        )
+        status.imu_data_valid = bool(
+            imu_data_valid
+        )
+        status.origin_valid = bool(
+            origin_valid
+        )
+        status.gnss_quality_ok = bool(
+            gnss_quality_ok
+        )
+        status.gnss_degraded_candidate = bool(
+            degraded_candidate
+        )
+
+        status.gps_age_sec = float(gps_age)
+        status.imu_age_sec = float(imu_age)
+
+        status.valid = bool(
+            origin_valid
+            and imu_data_valid
+            and gnss_quality_ok
+            and geometry_valid
+        )
+
         status.reason = (
             'OK'
             if status.valid
             else '; '.join(reasons)
         )
+
+        if geometry_valid:
+            status.east = float(east)
+            status.north = float(north)
+
         self.status_pub.publish(status)
 
         if not status.valid:
             return
 
-        assert self.latest_gps is not None
         assert self.latest_imu is not None
 
-        heading_deg = float(self.latest_imu.yaw)
+        #######################################################################
+        # 正常定位位姿
+        #######################################################################
+
+        heading_deg = float(
+            self.latest_imu.yaw
+        )
         yaw_offset_deg = float(
-            self.get_parameter('yaw_offset_deg').value
+            self.get_parameter(
+                'yaw_offset_deg'
+            ).value
         )
 
         # MINS：北为0°，顺时针增加。
         # ROS：东为0°，逆时针增加。
         ros_yaw = math.radians(
-            90.0 - heading_deg + yaw_offset_deg
+            90.0
+            - heading_deg
+            + yaw_offset_deg
         )
 
         half_yaw = 0.5 * ros_yaw
@@ -584,15 +721,25 @@ class PatrolLocalization(Node):
         odom.pose.pose = pose.pose
         self.odom_pub.publish(odom)
 
-        if bool(self.get_parameter('publish_tf').value):
+        if bool(
+            self.get_parameter(
+                'publish_tf'
+            ).value
+        ):
             transform = TransformStamped()
             transform.header = pose.header
-            transform.child_frame_id = self.child_frame_id
+            transform.child_frame_id = (
+                self.child_frame_id
+            )
             transform.transform.translation.x = east
             transform.transform.translation.y = north
             transform.transform.translation.z = up
-            transform.transform.rotation = pose.pose.orientation
-            self.tf_broadcaster.sendTransform(transform)
+            transform.transform.rotation = (
+                pose.pose.orientation
+            )
+            self.tf_broadcaster.sendTransform(
+                transform
+            )
 
 
 def main(args=None) -> None:
