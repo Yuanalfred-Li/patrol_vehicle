@@ -187,6 +187,7 @@ mission_manager:
   entry_planner_load_route_service: /patrol/entry_planner/load_route
   route_follower_load_route_service: /patrol/route_follower/load_route
   current_route_file: /home/nvidia/patrol_ws/routes/test_route.yaml
+  status_heartbeat_sec: 1.0
 
 
 map_frontend:

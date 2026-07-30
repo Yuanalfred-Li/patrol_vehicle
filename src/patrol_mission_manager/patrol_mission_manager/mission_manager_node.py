@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import time
+
 from pathlib import Path
 from typing import Optional
 
@@ -63,6 +65,10 @@ class PatrolMissionManager(Node):
         self.declare_parameter(
             'current_route_file',
             '',
+        )
+        self.declare_parameter(
+            'status_heartbeat_sec',
+            1.0,
         )
 
         status_qos = QoSProfile(depth=1)
@@ -183,12 +189,30 @@ class PatrolMissionManager(Node):
         self.entry_status: Optional[TaskStatus] = None
         self.route_status: Optional[TaskStatus] = None
 
+        self.last_status_state = int(TaskStatus.IDLE)
+        self.last_status_message = 'mission manager ready'
+        self.last_status_progress = 0.0
+
+        heartbeat_sec = max(
+            0.2,
+            float(
+                self.get_parameter(
+                    'status_heartbeat_sec'
+                ).value
+            ),
+        )
+
         self.create_timer(0.05, self.state_timer)
 
         self.publish_status(
             TaskStatus.IDLE,
             'mission manager ready',
             0.0,
+        )
+
+        self.create_timer(
+            heartbeat_sec,
+            self.publish_status_heartbeat,
         )
 
         self.get_logger().info('mission manager ready')
@@ -872,24 +896,39 @@ class PatrolMissionManager(Node):
         if self.route_enable_client.service_is_ready():
             self.route_enable_client.call_async(request)
 
+    def publish_status_heartbeat(self) -> None:
+        self.publish_status(
+            self.last_status_state,
+            self.last_status_message,
+            self.last_status_progress,
+        )
+
     def publish_status(
         self,
         state: int,
         message: str,
         progress: float,
     ) -> None:
+        normalized_progress = float(max(
+            0.0,
+            min(1.0, progress),
+        ))
+
+        self.last_status_state = int(state)
+        self.last_status_message = str(message)
+        self.last_status_progress = normalized_progress
+
         status = TaskStatus()
         status.header.stamp = (
             self.get_clock().now().to_msg()
         )
         status.header.frame_id = 'patrol_map'
         status.state = int(state)
-        status.task = 'patrol_mission'
+        status.task = (
+            f'patrol_mission/{self.phase}'
+        )
         status.message = str(message)
-        status.progress = float(max(
-            0.0,
-            min(1.0, progress),
-        ))
+        status.progress = normalized_progress
 
         self.status_pub.publish(status)
 

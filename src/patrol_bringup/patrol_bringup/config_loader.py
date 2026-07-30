@@ -130,6 +130,7 @@ def load_patrol_config(
     entry = _require_mapping(data, 'entry_executor')
     follower = _require_mapping(data, 'route_follower')
     command = _require_mapping(data, 'command_manager')
+    mission = _require_mapping(data, 'mission_manager')
 
     _number(
         startup,
@@ -155,6 +156,13 @@ def load_patrol_config(
         safety,
         'maximum_origin_distance_m',
         strictly_positive=True,
+    )
+
+    _number(
+        mission,
+        'status_heartbeat_sec',
+        strictly_positive=True,
+        maximum=1.0,
     )
 
     entry_forward = _number(

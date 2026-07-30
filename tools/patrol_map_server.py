@@ -51,7 +51,11 @@ from urllib.parse import parse_qs, unquote, urlparse
 import rclpy
 import yaml
 from msg_out.msg import ImuStatus
-from patrol_interfaces.msg import LocalizationStatus, TaskStatus
+from patrol_interfaces.msg import (
+    ControlMode,
+    LocalizationStatus,
+    TaskStatus,
+)
 from sensor_msgs.msg import NavSatFix
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
@@ -1013,6 +1017,7 @@ class SharedState:
     localization: Optional[dict[str, Any]] = None
     gps: Optional[dict[str, Any]] = None
     imu: Optional[dict[str, Any]] = None
+    control_mode: Optional[dict[str, Any]] = None
     mission: Optional[dict[str, Any]] = None
     trace: list[list[float]] = field(
         default_factory=list
@@ -1178,6 +1183,24 @@ class SharedState:
                 "received_at": time.time(),
             }
 
+    def update_control_mode(
+        self,
+        message: ControlMode,
+    ) -> None:
+        mode = int(message.mode)
+
+        with self.lock:
+            self.control_mode = {
+                "mode": mode,
+                "name": {
+                    int(ControlMode.STOP): "STOP",
+                    int(ControlMode.MANUAL): "MANUAL",
+                    int(ControlMode.AUTO): "AUTO",
+                }.get(mode, f"UNKNOWN({mode})"),
+                "source": str(message.source),
+                "received_at": time.time(),
+            }
+
     def navigation_fix_locked(
         self,
     ) -> Optional[dict[str, Any]]:
@@ -1271,10 +1294,28 @@ class SharedState:
         self,
         message: TaskStatus,
     ) -> None:
+        task = str(message.task)
+        prefix = "patrol_mission/"
+
+        phase = (
+            task[len(prefix):]
+            if task.startswith(prefix)
+            else ""
+        )
+
+        state = int(message.state)
+
         with self.lock:
             self.mission = {
-                "state": int(message.state),
-                "task": str(message.task),
+                "state": state,
+                "state_name": {
+                    int(TaskStatus.IDLE): "IDLE",
+                    int(TaskStatus.RUNNING): "RUNNING",
+                    int(TaskStatus.SUCCEEDED): "SUCCEEDED",
+                    int(TaskStatus.FAILED): "FAILED",
+                }.get(state, f"UNKNOWN({state})"),
+                "task": task,
+                "phase": phase,
                 "message": str(message.message),
                 "progress": float(message.progress),
                 "received_at": time.time(),
@@ -1288,6 +1329,11 @@ class SharedState:
                 "localization": (
                     dict(self.localization)
                     if self.localization is not None
+                    else None
+                ),
+                "control_mode": (
+                    dict(self.control_mode)
+                    if self.control_mode is not None
                     else None
                 ),
                 "mission": (
@@ -1388,6 +1434,13 @@ class PatrolMapBridge(Node):
             10,
         )
 
+        self.create_subscription(
+            ControlMode,
+            "/patrol/control_mode",
+            self.control_mode_callback,
+            10,
+        )
+
         self.get_logger().info(
             "patrol map bridge ready; "
             "read-only visualization and route saving"
@@ -1418,6 +1471,12 @@ class PatrolMapBridge(Node):
         message: TaskStatus,
     ) -> None:
         self.shared_state.update_mission(message)
+
+    def control_mode_callback(
+        self,
+        message: ControlMode,
+    ) -> None:
+        self.shared_state.update_control_mode(message)
 
 
 class RouteStore:
@@ -3722,37 +3781,157 @@ async function updateReplayStatus() {{
     const status = document.getElementById(
       "replay-status"
     );
+    const startButton = document.getElementById(
+      "start-replay-button"
+    );
 
     const state = String(
-      result.state || "IDLE"
+      result.state || "OFFLINE"
     );
+
+    const stateLabels = {{
+      IDLE: "待命",
+      OFFLINE: "运行时离线",
+      STARTING: "启动和安全检查中",
+      ROUTE_LOADING: "正在加载路线",
+      ROUTE_ROLLBACK: "路线加载失败，正在回滚",
+      READY: "路线已就绪",
+      ENTRY_PLANNING: "正在规划入轨路径",
+      ENTRY_STARTING: "正在启动入轨执行",
+      ENTRY_RUNNING: "正在驶向路线起点",
+      ROUTE_STARTING: "正在启动路线跟踪",
+      ROUTE_RUNNING: "正在沿路线巡迹",
+      MISSION_RUNNING: "自动任务运行中",
+      COMPLETED: "巡迹完成",
+      STOPPING: "正在停止",
+      STOPPED: "已停止",
+      REQUEST_COMPLETED: "启动请求已完成",
+      FAILED: "任务失败"
+    }};
+
+    const runningStates = [
+      "STARTING",
+      "ROUTE_LOADING",
+      "ROUTE_ROLLBACK",
+      "ENTRY_PLANNING",
+      "ENTRY_STARTING",
+      "ENTRY_RUNNING",
+      "ROUTE_STARTING",
+      "ROUTE_RUNNING",
+      "MISSION_RUNNING",
+      "STOPPING"
+    ];
+
+    const successStates = [
+      "READY",
+      "COMPLETED",
+      "STOPPED"
+    ];
 
     status.className = (
       state === "FAILED"
         ? "card error"
         : (
-          state === "STARTED"
-          || state === "STOPPED"
-            ? "card ok"
-            : "card"
+          runningStates.includes(state)
+            ? "card warn"
+            : (
+              successStates.includes(state)
+                ? "card ok"
+                : "card"
+            )
         )
     );
 
     status.style.display = "block";
-    status.textContent =
-      "巡迹控制：" + state
-      + (
-        result.route
-          ? "，路线：" + result.route
-          : ""
-      )
-      + (
-        result.message
-          ? "，信息：" + result.message
-          : ""
+
+    if (startButton) {{
+      startButton.disabled = Boolean(
+        result.active
       );
+    }}
+
+    const parts = [
+      "巡迹状态："
+      + (
+        stateLabels[state]
+        || state
+      )
+    ];
+
+    if (result.route) {{
+      parts.push("路线：" + result.route);
+    }}
+
+    if (
+      Number.isFinite(
+        Number(result.progress)
+      )
+      && (
+        result.active
+        || state === "COMPLETED"
+      )
+    ) {{
+      parts.push(
+        "进度："
+        + Math.round(
+          Number(result.progress) * 100
+        )
+        + "%"
+      );
+    }}
+
+    if (result.control_mode) {{
+      parts.push(
+        "控制模式："
+        + String(
+          result.control_mode.name
+          || result.control_mode.mode
+        )
+      );
+    }}
+
+    if (result.localization) {{
+      const localizationValid = Boolean(
+        result.localization.valid
+      );
+
+      parts.push(
+        localizationValid
+          ? "定位：有效"
+          : (
+            "定位：无效（"
+            + String(
+              result.localization.reason
+              || "unknown"
+            )
+            + "）"
+          )
+      );
+    }} else {{
+      parts.push("定位：无数据");
+    }}
+
+    if (result.message) {{
+      parts.push(
+        "信息：" + String(result.message)
+      );
+    }}
+
+    status.textContent = parts.join("，");
   }} catch (error) {{
-    console.warn("巡迹状态读取失败", error);
+    const status = document.getElementById(
+      "replay-status"
+    );
+
+    status.className = "card error";
+    status.style.display = "block";
+    status.textContent =
+      "巡迹状态：地图后台连接失败";
+
+    console.warn(
+      "巡迹状态读取失败",
+      error
+    );
   }}
 }}
 
@@ -3842,8 +4021,193 @@ class ReplayController:
         }
 
     def status(self) -> dict[str, Any]:
+        snapshot = self.shared_state.snapshot()
+        mission = snapshot.get("mission")
+        localization = snapshot.get("localization")
+        control_mode = snapshot.get("control_mode")
+        now = time.time()
+
         with self.lock:
-            return dict(self.state)
+            result = dict(self.state)
+            process = self.process
+            process_running = (
+                process is not None
+                and process.poll() is None
+            )
+
+        result["startup_process_running"] = process_running
+        result["mission"] = mission
+        result["localization"] = localization
+        result["control_mode"] = control_mode
+
+        mission_fresh = False
+        mission_age = None
+
+        if mission is not None:
+            mission_age = max(
+                0.0,
+                now - float(
+                    mission.get("received_at", 0.0)
+                ),
+            )
+            mission_fresh = mission_age <= 2.0
+
+        result["mission_age_sec"] = mission_age
+        result["runtime_online"] = mission_fresh
+
+        localization_age = None
+
+        if localization is not None:
+            localization_age = max(
+                0.0,
+                now - float(
+                    localization.get(
+                        "received_at",
+                        0.0,
+                    )
+                ),
+            )
+
+        result["localization_age_sec"] = (
+            localization_age
+        )
+
+        mission_state = (
+            int(mission.get("state", -1))
+            if mission_fresh
+            else -1
+        )
+        phase = (
+            str(mission.get("phase", ""))
+            if mission_fresh
+            else ""
+        )
+        mission_message = (
+            str(mission.get("message", ""))
+            if mission_fresh
+            else ""
+        )
+        progress = (
+            float(mission.get("progress", 0.0))
+            if mission_fresh
+            else 0.0
+        )
+
+        phase_states = {
+            "LOADING_ROUTE_FOLLOWER":
+                "ROUTE_LOADING",
+            "LOADING_ENTRY_PLANNER":
+                "ROUTE_LOADING",
+            "LOADING_LOCALIZATION":
+                "ROUTE_LOADING",
+            "ROLLING_BACK_ROUTE":
+                "ROUTE_ROLLBACK",
+            "PLANNING":
+                "ENTRY_PLANNING",
+            "STARTING_ENTRY":
+                "ENTRY_STARTING",
+            "ENTRY":
+                "ENTRY_RUNNING",
+            "STARTING_ROUTE":
+                "ROUTE_STARTING",
+            "ROUTE":
+                "ROUTE_RUNNING",
+        }
+
+        state = str(result.get("state", "IDLE"))
+        message = str(
+            result.get("message", "waiting")
+        )
+        active = False
+
+        if (
+            mission_state
+            == int(TaskStatus.RUNNING)
+        ):
+            state = phase_states.get(
+                phase,
+                "MISSION_RUNNING",
+            )
+            message = (
+                mission_message
+                or f"mission phase: {phase}"
+            )
+            active = True
+
+        elif (
+            mission_state
+            == int(TaskStatus.SUCCEEDED)
+        ):
+            state = "COMPLETED"
+            message = (
+                mission_message
+                or "patrol mission completed"
+            )
+
+        elif (
+            mission_state
+            == int(TaskStatus.FAILED)
+        ):
+            state = "FAILED"
+            message = (
+                mission_message
+                or "patrol mission failed"
+            )
+
+        elif process_running:
+            state = "STARTING"
+            message = str(
+                result.get(
+                    "message",
+                    "安全检查和巡迹启动进行中",
+                )
+            )
+            active = True
+
+        elif (
+            state == "FAILED"
+            and result.get("exit_code") not in (
+                None,
+                0,
+            )
+        ):
+            # 保留启动脚本失败状态。
+            pass
+
+        elif (
+            mission_state
+            == int(TaskStatus.IDLE)
+        ):
+            if (
+                "stopped"
+                in mission_message.lower()
+                or state == "STOPPED"
+            ):
+                state = "STOPPED"
+            else:
+                state = "READY"
+
+            message = (
+                mission_message
+                or "mission manager ready"
+            )
+
+        else:
+            state = "OFFLINE"
+            message = (
+                "未收到有效的实时任务状态"
+            )
+
+        result["state"] = state
+        result["stage"] = phase
+        result["message"] = message
+        result["progress"] = max(
+            0.0,
+            min(1.0, progress),
+        )
+        result["active"] = active
+
+        return result
 
     def start(
         self,
@@ -3887,11 +4251,32 @@ class ReplayController:
                 f"{self.maximum_origin_distance_m:.2f} m"
             )
 
+        mission = snapshot.get("mission")
+        mission_active = False
+
+        if mission is not None:
+            mission_age = (
+                time.time()
+                - float(
+                    mission.get(
+                        "received_at",
+                        0.0,
+                    )
+                )
+            )
+            mission_active = (
+                mission_age <= 2.0
+                and int(mission.get("state", -1))
+                == int(TaskStatus.RUNNING)
+            )
+
         with self.lock:
-            if self.state.get("state") in (
-                "STARTING",
-                "STARTED",
-            ):
+            process_running = (
+                self.process is not None
+                and self.process.poll() is None
+            )
+
+            if process_running or mission_active:
                 raise ValueError(
                     "已有巡迹任务正在启动或运行，"
                     "请先停止当前巡迹"
@@ -3974,8 +4359,11 @@ class ReplayController:
                 state = "STOPPED"
                 message = "巡迹已停止"
             elif exit_code == 0:
-                state = "STARTED"
-                message = "启动脚本执行成功"
+                state = "REQUEST_COMPLETED"
+                message = (
+                    "启动脚本执行完成，"
+                    "等待实时任务状态"
+                )
             else:
                 state = "FAILED"
                 message = (
@@ -4021,7 +4409,7 @@ class ReplayController:
             self.process = None
             self.state["state"] = "STOPPED"
             self.state["message"] = (
-                "巡迹已停止，底层节点保持运行"
+                "巡迹已停止，上层和底层节点保持运行"
                 if result.returncode == 0
                 else "停车脚本已执行，请检查日志"
             )
