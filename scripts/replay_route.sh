@@ -5,6 +5,7 @@ set -Eeuo pipefail
 WS="/home/nvidia/patrol_ws"
 ROUTES_DIR="$WS/routes"
 LOGS_DIR="$WS/logs"
+CONFIG_FILE="$WS/config/patrol_system.yaml"
 
 AUTO_CONFIRM=0
 ROUTE_INPUT=""
@@ -68,6 +69,11 @@ source /opt/ros/humble/setup.bash
 source /home/nvidia/ros2_humble_main/install/setup.bash
 source /home/nvidia/patrol_ws/install/setup.bash
 set -u
+
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "[patrol] 统一配置文件不存在：$CONFIG_FILE"
+    exit 1
+fi
 
 if [ ! -f "$ROUTE_FILE" ]; then
     echo "[patrol] 路线不存在：$ROUTE_FILE"
@@ -312,6 +318,7 @@ setsid ros2 launch \
     patrol_bringup \
     replay_patrol.launch.py \
     route_file:="$ROUTE_FILE" \
+    config_file:="$CONFIG_FILE" \
     vehicle_command_topic:=/vehicle/command \
     > "$LAUNCH_LOG" 2>&1 &
 
@@ -514,54 +521,10 @@ ros2 service call \
     2>&1 || true
 
 
-set_low_speed_parameter() {
-    local node_name="$1"
-    local parameter_name="$2"
-    local parameter_value="$3"
-    local result
+echo "[patrol] 巡迹参数已由统一配置加载："
+echo "  $CONFIG_FILE"
 
-    result="$(
-        timeout 5 ros2 param set             "$node_name"             "$parameter_name"             "$parameter_value"             2>&1
-    )"
 
-    echo "$node_name $parameter_name=$parameter_value"
-    echo "$result"
-    echo "$node_name $parameter_name=$parameter_value: $result"         >> "$RUN_DIR/speed_parameters.log"
-
-    if ! grep -q         "Set parameter successful"         <<< "$result"; then
-
-        echo "[patrol] 低速参数设置失败，禁止开始复现。"
-        exit 1
-    fi
-}
-
-echo "[patrol] 设置低速复现参数..."
-
-set_low_speed_parameter     /patrol_entry_executor     forward_speed_rpm     15.0
-
-set_low_speed_parameter     /patrol_entry_executor     reverse_speed_rpm     10.0
-
-set_low_speed_parameter \
-    /patrol_route_follower \
-    minimum_speed_rpm \
-    10.0
-
-set_low_speed_parameter \
-    /patrol_route_follower \
-    max_speed_rpm \
-    15.0
-
-set_low_speed_parameter \
-    /patrol_route_follower \
-    lookahead_distance \
-    1.0
-
-echo "[patrol] 低速参数设置完成："
-echo "  入轨前进：15 RPM"
-echo "  入轨倒车：10 RPM"
-echo "  路线速度：10～15 RPM"
-
-echo
 echo "========================================"
 echo "路线复现准备完成"
 echo "========================================"
