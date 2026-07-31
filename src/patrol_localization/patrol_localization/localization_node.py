@@ -539,7 +539,9 @@ class PatrolLocalization(Node):
             status.nsv1 = int(imu.nsv1)
             status.nsv2 = int(imu.nsv2)
             status.yaw_deg = float(imu.yaw)
-            status.nav_st = int(imu.nav_st)
+            status.nav_st = int(
+            getattr(imu, 'nav_st', 0)
+        )
 
             imu_reasons = []
 
