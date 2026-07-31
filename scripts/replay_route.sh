@@ -87,8 +87,8 @@ if [ ! -f "$ROUTE_FILE" ]; then
     exit 1
 fi
 
-python3 - "$ROUTE_FILE" <<'PY' |
-    tee "$RUN_DIR/route_check.txt"
+python3 - "$ROUTE_FILE" <<'PY' \
+    | tee "$RUN_DIR/route_check.txt"
 import math
 import sys
 from pathlib import Path
@@ -162,9 +162,14 @@ print("origin yaw：", origin.get("yaw_deg", "未保存"))
 PY
 
 service_exists() {
-    timeout 3 ros2 service list \
-        2>/dev/null |
-        grep -Fxq "$1"
+    local service_name="$1"
+    local services
+
+    services="$(
+        timeout 3 ros2 service list 2>/dev/null || true
+    )"
+
+    grep -Fxq "$service_name" <<< "$services"
 }
 
 safe_stop() {
@@ -231,9 +236,13 @@ ip -details link show can0 \
 
 CAN_STATE="$(
     awk '
-        /can state / {
-            print $3
-            exit
+        /can .*state / {
+            for (i = 1; i <= NF; i++) {
+                if ($i == "state" && i < NF) {
+                    print $(i + 1)
+                    exit
+                }
+            }
         }
     ' "$RUN_DIR/can0.txt"
 )"
@@ -277,6 +286,18 @@ safe_stop
 echo
 echo "[patrol] 动态加载路线..."
 
+MISSION_STATUS_LOG="$RUN_DIR/mission_load_status.txt"
+: > "$MISSION_STATUS_LOG"
+
+# 在发送加载请求前建立持续订阅，避免错过短暂的完成状态。
+stdbuf -oL -eL timeout 20 ros2 topic echo \
+    /patrol/mission/status \
+    > "$MISSION_STATUS_LOG" \
+    2>&1 &
+
+MISSION_STATUS_PID=$!
+sleep 1.0
+
 LOAD_RESULT="$(
     timeout 8 ros2 service call \
         /patrol/mission/load_route \
@@ -301,25 +322,22 @@ ROUTE_LOAD_DONE=0
 
 echo "[patrol] 等待三个组件完成路线切换..."
 
-for _ in $(seq 1 100); do
-    timeout 1 ros2 topic echo \
-        /patrol/mission/status \
-        --once \
-        > "$RUN_DIR/mission_load_status.txt" \
-        2>&1 || true
-
+for _ in $(seq 1 75); do
     if grep -Fq \
         "route load failed:" \
-        "$RUN_DIR/mission_load_status.txt"; then
+        "$MISSION_STATUS_LOG"; then
 
         echo "[patrol] 路线协调加载失败："
-        cat "$RUN_DIR/mission_load_status.txt"
+        cat "$MISSION_STATUS_LOG"
+
+        kill "$MISSION_STATUS_PID" 2>/dev/null || true
+        wait "$MISSION_STATUS_PID" 2>/dev/null || true
         exit 1
     fi
 
     if grep -Fq \
         "route loaded and ready: $ROUTE_BASENAME" \
-        "$RUN_DIR/mission_load_status.txt"; then
+        "$MISSION_STATUS_LOG"; then
 
         ROUTE_LOAD_DONE=1
         break
@@ -327,6 +345,9 @@ for _ in $(seq 1 100); do
 
     sleep 0.2
 done
+
+kill "$MISSION_STATUS_PID" 2>/dev/null || true
+wait "$MISSION_STATUS_PID" 2>/dev/null || true
 
 if [ "$ROUTE_LOAD_DONE" -ne 1 ]; then
     echo "[patrol] 等待路线协调加载完成超时。"

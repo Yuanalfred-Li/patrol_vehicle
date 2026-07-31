@@ -14,6 +14,9 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     start_mins200 = LaunchConfiguration('start_mins200')
     start_vehicle_can = LaunchConfiguration('start_vehicle_can')
+    can_transmit_enabled = LaunchConfiguration(
+        'can_transmit_enabled'
+    )
 
     mins200_launch = PathJoinSubstitution([
         FindPackageShare('mins200_tcp_demo'),
@@ -38,6 +41,11 @@ def generate_launch_description():
             default_value='false',
         ),
 
+        DeclareLaunchArgument(
+            'can_transmit_enabled',
+            default_value='false',
+        ),
+
         LogInfo(
             msg='Starting patrol hardware layer',
         ),
@@ -54,5 +62,13 @@ def generate_launch_description():
                 vehicle_launch
             ),
             condition=IfCondition(start_vehicle_can),
+            launch_arguments={
+                'can_transmit_enabled':
+                    can_transmit_enabled,
+                'send_heartbeat_enabled': 'false',
+                'configure_can_interface': 'false',
+                'accept_cmd_vel': 'false',
+                'accept_cmd_aux': 'false',
+            }.items(),
         ),
     ])

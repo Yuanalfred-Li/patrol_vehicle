@@ -20,9 +20,14 @@ set -u
 LAUNCH_PID=""
 
 service_exists() {
-    timeout 3 ros2 service list \
-        2>/dev/null |
-        grep -Fxq "$1"
+    local service_name="$1"
+    local services
+
+    services="$(
+        timeout 3 ros2 service list 2>/dev/null || true
+    )"
+
+    grep -Fxq "$service_name" <<< "$services"
 }
 
 set_stop_mode() {
@@ -119,10 +124,16 @@ ip -details link show can0 \
     2>&1 || true
 
 CAN_STATE="$(
-    awk '/can state / {
-        print $3
-        exit
-    }' "$RUN_DIR/can0.txt"
+    awk '
+        /can .*state / {
+            for (i = 1; i <= NF; i++) {
+                if ($i == "state" && i < NF) {
+                    print $(i + 1)
+                    exit
+                }
+            }
+        }
+    ' "$RUN_DIR/can0.txt"
 )"
 
 case "$CAN_STATE" in

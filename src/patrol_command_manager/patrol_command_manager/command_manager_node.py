@@ -250,8 +250,20 @@ class PatrolCommandManager(Node):
             min(100, int(source.brake_pedal)),
         )
 
-        # 所有 ROS 手动/自动命令都通过底盘自动控制通道发送。
-        command.parking_brake = 1
+        # 中央安全规则：
+        # 只有非零速度且未请求满制动时才释放驻车。
+        motion_requested = (
+            abs(command.target_speed_rpm) > 0.1
+            and command.brake_pedal < 100
+        )
+
+        if motion_requested:
+            command.parking_brake = 1
+        else:
+            command.target_speed_rpm = 0.0
+            command.brake_pedal = 100
+            command.parking_brake = 0
+
         command.control_mode = 1
 
         command.headlamp = bool(source.headlamp)
@@ -278,22 +290,23 @@ class PatrolCommandManager(Node):
 
         if command.emergency_stop:
             command.target_speed_rpm = 0.0
+            command.brake_pedal = 100
             command.parking_brake = 0
             command.brake_light = True
 
         return command
 
     def make_motion_stop_command(self) -> VehicleCommand:
-        """停止运动，但保持驻车制动释放。"""
+        """上游命令超时时执行制动并启用驻车."""
         command = VehicleCommand()
         command.header.stamp = self.get_clock().now().to_msg()
 
         command.target_speed_rpm = 0.0
         command.target_steering_angle_deg = 0.0
-        command.brake_pedal = 0
+        command.brake_pedal = 100
 
         # 底盘协议：1=释放驻车，0=启用驻车。
-        command.parking_brake = 1
+        command.parking_brake = 0
         command.control_mode = 1
         command.brake_light = True
         command.emergency_stop = False

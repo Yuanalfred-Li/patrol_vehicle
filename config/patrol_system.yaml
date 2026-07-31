@@ -174,7 +174,7 @@ command_manager:
   maximum_speed_rpm: 40.0
   maximum_steering_request: 400.0
 
-  stop_brake_pedal: 0
+  stop_brake_pedal: 100
   stop_parking_brake: 0
 
 mission_manager:

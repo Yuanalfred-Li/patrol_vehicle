@@ -1,0 +1,458 @@
+diff --git a/src/driver/vehicle_can_interface/launch/vehicle_interface.launch.py b/src/driver/vehicle_can_interface/launch/vehicle_interface.launch.py
+index f72297a..db593d4 100644
+--- a/src/driver/vehicle_can_interface/launch/vehicle_interface.launch.py
++++ b/src/driver/vehicle_can_interface/launch/vehicle_interface.launch.py
+@@ -1,8 +1,53 @@
+ from launch import LaunchDescription
++from launch.actions import DeclareLaunchArgument
++from launch.substitutions import LaunchConfiguration
+ from launch_ros.actions import Node
+ 
++
+ def generate_launch_description():
++    can_transmit_enabled = LaunchConfiguration('can_transmit_enabled', default='false')
++    send_heartbeat_enabled = LaunchConfiguration('send_heartbeat_enabled', default='false')
++    configure_can_interface = LaunchConfiguration('configure_can_interface', default='false')
++    accept_cmd_vel = LaunchConfiguration('accept_cmd_vel', default='false')
++    accept_cmd_aux = LaunchConfiguration('accept_cmd_aux', default='false')
++    command_timeout_s = LaunchConfiguration('command_timeout_s', default='0.5')
++    feedback_timeout_s = LaunchConfiguration('feedback_timeout_s', default='1.0')
++    safe_brake_pedal = LaunchConfiguration('safe_brake_pedal', default='100')
++
+     return LaunchDescription([
++        DeclareLaunchArgument(
++            'can_transmit_enabled', default_value='false',
++            description='Enable CAN transmit. Default false = read-only safe mode.'
++        ),
++        DeclareLaunchArgument(
++            'send_heartbeat_enabled', default_value='false',
++            description='Transmit 0x18EF1101/1102 heartbeat frames. Keep false when another bus node already owns these IDs.'
++        ),
++        DeclareLaunchArgument(
++            'configure_can_interface', default_value='false',
++            description='Whether this node configures the CAN interface. Default false = use existing can0.'
++        ),
++        DeclareLaunchArgument(
++            'accept_cmd_aux', default_value='false',
++            description='Whether to subscribe to /vehicle/cmd_aux. Default false = auxiliary override disabled.'
++        ),
++        DeclareLaunchArgument(
++            'command_timeout_s', default_value='0.5',
++            description='Fresh /vehicle/command timeout before reverting to parked/braked safe output.'
++        ),
++        DeclareLaunchArgument(
++            'feedback_timeout_s', default_value='1.0',
++            description='Maximum CAN feedback age before /vehicle/status is suppressed.'
++        ),
++        DeclareLaunchArgument(
++            'safe_brake_pedal', default_value='100',
++            description='Brake percentage used by the default and command-timeout safe output.'
++        ),
++        DeclareLaunchArgument(
++            'accept_cmd_vel', default_value='false',
++            description='Whether to subscribe to /cmd_vel and convert to vehicle commands. Default false = bypass disabled.'
++        ),
++
+         Node(
+             package='vehicle_can_interface',
+             executable='vehicle_interface',
+@@ -13,7 +58,16 @@ def generate_launch_description():
+                 {'wheel_radius': 0.2},
+                 {'reduction_ratio': 22.7},
+                 {'steering_ratio': 1.0},
+-                {'max_steering_angle_deg': 400.0}
++                {'max_steering_angle_deg': 400.0},
++                # Safety: default READ-ONLY (receive-only, no CAN transmit)
++                {'can_transmit_enabled': can_transmit_enabled},
++                {'send_heartbeat_enabled': send_heartbeat_enabled},
++                {'configure_can_interface': configure_can_interface},
++                {'accept_cmd_vel': accept_cmd_vel},
++                {'accept_cmd_aux': accept_cmd_aux},
++                {'command_timeout_s': command_timeout_s},
++                {'feedback_timeout_s': feedback_timeout_s},
++                {'safe_brake_pedal': safe_brake_pedal},
+             ]
+         )
+     ])
+diff --git a/src/driver/vehicle_can_interface/vehicle_can_interface/vehicle_interface_node.py b/src/driver/vehicle_can_interface/vehicle_can_interface/vehicle_interface_node.py
+index e60e98f..4a6723f 100644
+--- a/src/driver/vehicle_can_interface/vehicle_can_interface/vehicle_interface_node.py
++++ b/src/driver/vehicle_can_interface/vehicle_can_interface/vehicle_interface_node.py
+@@ -6,6 +6,7 @@ from vehicle_can_msg.msg import VehicleCommand, VehicleStatus
+ import json
+ import math
+ import os
++import subprocess
+ from .can_driver import CanDriver
+ from .protocol import VehicleProtocol
+ import time
+@@ -21,11 +22,29 @@ class VehicleInterfaceNode(Node):
+         self.declare_parameter('reduction_ratio', 22.7)
+         self.declare_parameter('steering_ratio', 1.0) # Steering wheel angle / Tire angle
+         self.declare_parameter('max_steering_angle_deg', 400.0) # Max steering wheel angle in degrees
+-        
++
++        # Safety parameters — default READ-ONLY, NO transmit
++        self.declare_parameter('can_transmit_enabled', False)
++        self.declare_parameter('send_heartbeat_enabled', False)
++        self.declare_parameter('configure_can_interface', False)
++        self.declare_parameter('accept_cmd_vel', False)
++        self.declare_parameter('accept_cmd_aux', False)
++        self.declare_parameter('command_timeout_s', 0.5)
++        self.declare_parameter('feedback_timeout_s', 1.0)
++        self.declare_parameter('safe_brake_pedal', 100)
++
+         self.can_channel = self.get_parameter('can_channel').get_parameter_value().string_value
+         self.wheel_radius = self.get_parameter('wheel_radius').get_parameter_value().double_value
+         self.reduction_ratio = self.get_parameter('reduction_ratio').get_parameter_value().double_value
+         self.steering_ratio = self.get_parameter('steering_ratio').get_parameter_value().double_value
++        self.can_transmit_enabled = self.get_parameter('can_transmit_enabled').get_parameter_value().bool_value
++        self.send_heartbeat_enabled = self.get_parameter('send_heartbeat_enabled').get_parameter_value().bool_value
++        self.configure_can_interface = self.get_parameter('configure_can_interface').get_parameter_value().bool_value
++        self.accept_cmd_vel = self.get_parameter('accept_cmd_vel').get_parameter_value().bool_value
++        self.accept_cmd_aux = self.get_parameter('accept_cmd_aux').get_parameter_value().bool_value
++        self.command_timeout_s = float(self.get_parameter('command_timeout_s').value)
++        self.feedback_timeout_s = float(self.get_parameter('feedback_timeout_s').value)
++        self.safe_brake_pedal = int(self.get_parameter('safe_brake_pedal').value)
+         
+         # State
+         self.target_speed_rpm = 0.0 # 目标转速(RPM)
+@@ -46,23 +65,53 @@ class VehicleInterfaceNode(Node):
+             'net_enable': 0
+         }
+ 
++        self._set_safe_command()
++        self._last_command_time = None
++        self._last_feedback_time = None
++        self._command_timeout_active = True
++        self._feedback_timeout_active = False
++        self._battery_soc_unavailable_warned = False
++
+         self.current_status = VehicleStatus()
+ 
++        # Only publish /vehicle/status after receiving real CAN feedback
++        self._feedback_received = False
++
+         # Components
+-        self.setup_can_interface()
+-        self.driver = CanDriver(channel=self.can_channel)
+         self.protocol = VehicleProtocol()
++        self.driver = CanDriver(channel=self.can_channel)
+ 
+         if not self.driver.connect():
+             self.get_logger().error("Could not connect to CAN bus!")
+             # We don't exit, just log, maybe it comes up later or is simulated
+ 
++        # Conditionally configure CAN interface (default: False = read-only)
++        if self.configure_can_interface:
++            self.setup_can_interface()
++        else:
++            self.get_logger().info(
++                "configure_can_interface=false: CAN interface setup SKIPPED. "
++                "Will attach to existing can0 in read-only mode."
++            )
++
+         # Publishers
+         self.status_pub = self.create_publisher(VehicleStatus, '/vehicle/status', 10)
+ 
+-        # Subscribers # 订阅控制指令话题：
+-        self.create_subscription(Twist, '/cmd_vel', self.cmd_vel_callback, 10)#（线性/角速度）
+-        self.create_subscription(String, '/vehicle/cmd_aux', self.cmd_aux_callback, 10)#（灯光、制动等）
++        # Subscribers
++        # /cmd_vel is gated: only created when accept_cmd_vel=true
++        if self.accept_cmd_vel:
++            self.create_subscription(Twist, '/cmd_vel', self.cmd_vel_callback, 10)
++            self.get_logger().info("accept_cmd_vel=true: /cmd_vel subscription ENABLED")
++        else:
++            self.get_logger().info("accept_cmd_vel=false: /cmd_vel subscription DISABLED")
++        if self.accept_cmd_aux:
++            self.create_subscription(String, '/vehicle/cmd_aux', self.cmd_aux_callback, 10)
++            self.get_logger().warn(
++                'accept_cmd_aux=true: auxiliary command subscription ENABLED; '
++                'it cannot change brake or parking state.'
++            )
++        else:
++            self.get_logger().info('accept_cmd_aux=false: /vehicle/cmd_aux subscription DISABLED')
+         self.create_subscription(VehicleCommand, '/vehicle/command', self.vehicle_command_callback, 10)
+ 
+         # Timer for 50ms cycle (20Hz)
+@@ -74,35 +123,142 @@ class VehicleInterfaceNode(Node):
+         # CAN Receive Timer (10ms)
+         self.create_timer(0.01, self.check_can_messages)
+ 
+-        self.get_logger().info("Vehicle Interface Node Started")
++        self.get_logger().info(
++            "Vehicle Interface Node Started — "
++            f"can_transmit_enabled={self.can_transmit_enabled}, "
++            f"configure_can_interface={self.configure_can_interface}, "
++            f"accept_cmd_vel={self.accept_cmd_vel}"
++        )
++        if not self.can_transmit_enabled:
++            self.get_logger().info(
++                "SAFE MODE: CAN transmit DISABLED. Node will receive feedback only. "
++                "Set can_transmit_enabled:=true to enable vehicle control."
++            )
++
++    def _run_can_cmd(self, cmd_list, check=False):
++        """用sudo运行CAN配置命令。优先使用免密sudo(需配置sudoers)"""
++        try:
++            # 优先尝试免密sudo
++            result = subprocess.run(
++                ['sudo', '-n'] + cmd_list,
++                capture_output=True, text=True, timeout=10
++            )
++            if result.returncode != 0:
++                self.get_logger().debug(f"sudo -n {' '.join(cmd_list)}: {result.stderr.strip()}")
++                # 回退：检查是否接口已存在/已配置
++                if check:
++                    return False
++            return result.returncode == 0
++        except subprocess.TimeoutExpired:
++            self.get_logger().error(f"CAN cmd timeout: {' '.join(cmd_list)}")
++            return False
++        except FileNotFoundError:
++            self.get_logger().error("sudo not available, cannot configure CAN")
++            return False
++
++    def _ensure_can_up(self):
++        """检查并确保CAN接口已up"""
++        try:
++            result = subprocess.run(
++                ['ip', 'link', 'show', self.can_channel],
++                capture_output=True, text=True, timeout=5
++            )
++            if result.returncode == 0 and 'UP' in result.stdout:
++                qlen_match = __import__('re').search(r'qlen\s+(\d+)', result.stdout)
++                if qlen_match and int(qlen_match.group(1)) >= 100:
++                    return True  # CAN已正确配置
++            return False
++        except Exception:
++            return False
+ 
+     def setup_can_interface(self):
++        """配置CAN接口。
++        推荐方式：sudoers 免除 ip 命令的密码
++          echo "nvidia ALL=(ALL) NOPASSWD: /sbin/ip" | sudo tee /etc/sudoers.d/can_setup
++          sudo chmod 440 /etc/sudoers.d/can_setup
++
++        回退方式：使用 can0 已被手动配置并启动。
++        """
+         try:
+             self.get_logger().info("Setting up CAN interface...")
+-            # Use echo to pipe password to sudo -S
+-            # WARNING: Hardcoding password is not secure. Consider using sudoers file instead.
+-            password = 'nvidia'
+-            os.system(f'echo {password} | sudo -S ip link set {self.can_channel} down')
+-            os.system(f'echo {password} | sudo -S ip link set {self.can_channel} type can bitrate 500000 restart-ms 1')
+-            os.system(f'echo {password} | sudo -S ip link set {self.can_channel} txqueuelen 1000')
+-            os.system(f'echo {password} | sudo -S ip link set {self.can_channel} up')
+-            self.get_logger().info("CAN interface setup complete.")
+-            time.sleep(5)
+-            # Send the initial message
+-            # 582#0100000000000000
+-            os.system(f'cansend {self.can_channel} 582#0100000000000000')
+-            self.get_logger().info("Sent initial CAN message.")
++
++            # 1. 先检查 CAN 是否已经 up 且配置正确
++            if self._ensure_can_up():
++                self.get_logger().info(f"CAN {self.can_channel} is already UP, skipping setup")
++            else:
++                self.get_logger().info(f"Configuring CAN {self.can_channel}...")
++                # 按照标准顺序配置
++                self._run_can_cmd(['ip', 'link', 'set', self.can_channel, 'down'])
++                self._run_can_cmd([
++                    'ip', 'link', 'set', self.can_channel,
++                    'type', 'can', 'bitrate', '500000', 'restart-ms', '1'
++                ])
++                self._run_can_cmd(['ip', 'link', 'set', self.can_channel, 'txqueuelen', '1000'])
++                self._run_can_cmd(['ip', 'link', 'set', self.can_channel, 'up'])
++
++                time.sleep(2)
++                if self._ensure_can_up():
++                    self.get_logger().info("CAN interface setup complete.")
++                else:
++                    self.get_logger().warn(
++                        f"⚠️  CAN {self.can_channel} may not be UP. "
++                        "Check sudoers: 'echo \"$(whoami) ALL=(ALL) NOPASSWD: /sbin/ip\" | sudo tee /etc/sudoers.d/can_setup'"
++                    )
+ 
+         except Exception as e:
+             self.get_logger().error(f"Error setting up CAN interface: {e}")
++            self.get_logger().warn(
++                "Simulation/testing mode: CAN not available, continuing without hardware"
++            )
+ 
+     def heartbeat_callback(self):
++        if (
++            not self.can_transmit_enabled
++            or not self.send_heartbeat_enabled
++        ):
++            return
+         # Send heartbeat messages
+         # ID: 0x18ef1101, Data: [0x00], Extended: True
+         self.driver.send(0x18ef1101, [0x00], is_extended_id=True)
+         # ID: 0x18ef1102, Data: [0x00], Extended: True
+         self.driver.send(0x18ef1102, [0x00], is_extended_id=True)
+ 
++    def _set_safe_command(self):
++        """Apply the only command state allowed before/after a fresh command."""
++        self.target_speed_rpm = 0.0
++        self.target_angle_deg = 0.0
++        self.brake_pct = max(0, min(100, self.safe_brake_pedal))
++        # VehicleCommand convention: 0=park, 1=release parking.
++        self.park_release = 0
++        self.aux_state = {
++            'pilo_model': 0,
++            'headlamp': 0,
++            'left_net': 0,
++            'left_turn': 0,
++            'right_net': 0,
++            'right_turn': 0,
++            'shan_light': 0,
++            'stop_lamp': 1,
++            'jiting': 0,
++            'net_enable': 0,
++        }
++
++    def _command_is_fresh(self, now):
++        return (
++            self._last_command_time is not None
++            and now - self._last_command_time <= self.command_timeout_s
++        )
++
++    def _feedback_is_fresh(self, now):
++        return (
++            self._last_feedback_time is not None
++            and now - self._last_feedback_time <= self.feedback_timeout_s
++        )
++
++    def _mark_command_received(self):
++        self._last_command_time = time.monotonic()
++        self._command_timeout_active = False
++
+     def cmd_vel_callback(self, msg):
+         # Linear X (m/s) -> RPM# 提取线速度
+         # RPM = (v / (2 * pi * r)) * 60 * reduction_ratio
+@@ -124,6 +280,8 @@ class VehicleInterfaceNode(Node):
+         # No, keep it manual or separate. But user might expect car to stop.
+         # If v=0, RPM=0.
+ 
++        self._mark_command_received()
++
+     def cmd_aux_callback(self, msg):
+         try:
+             data = json.loads(msg.data)
+@@ -132,12 +290,6 @@ class VehicleInterfaceNode(Node):
+                 if key in data:
+                     self.aux_state[key] = int(data[key])
+ 
+-            # Also handle brake/park if in json
+-            if 'brake' in data:
+-                self.brake_pct = int(data['brake'])
+-            if 'park' in data:
+-                self.park_release = int(data['park'])
+-
+         except json.JSONDecodeError:
+             self.get_logger().error("Invalid JSON in cmd_aux")
+ 
+@@ -158,24 +310,40 @@ class VehicleInterfaceNode(Node):
+         self.aux_state['stop_lamp'] = int(msg.brake_light)
+         self.aux_state['jiting'] = int(msg.emergency_stop)
+         self.aux_state['net_enable'] = int(msg.net_launch_enable)
++        self._mark_command_received()
+ 
+     def timer_callback(self):
+-        # Pack and send Req1# 打包并发送Req1（核心控制指令：速度、转向、制动、驻车）
+-        id1, data1 = self.protocol.pack_req1(
+-            self.target_speed_rpm,
+-            self.target_angle_deg,
+-            self.brake_pct,
+-            self.park_release
+-        )
+-        self.driver.send(id1, data1)
+-
+-        # Pack and send Req2# 打包并发送Req2（辅助控制指令：灯光、控制模式等）
+-        id2, data2 = self.protocol.pack_req2(**self.aux_state)
+-        self.driver.send(id2, data2)
+-
+-        # Publish Status
+-        self.current_status.header.stamp = self.get_clock().now().to_msg()
+-        self.status_pub.publish(self.current_status)
++        if self.can_transmit_enabled:
++            now = time.monotonic()
++            if not self._command_is_fresh(now):
++                if not self._command_timeout_active:
++                    self.get_logger().warn(
++                        'Vehicle command timeout: reverting to the parked/braked/non-auto safe command.'
++                    )
++                    self._command_timeout_active = True
++                self._set_safe_command()
++            # Pack and send Req1
++            id1, data1 = self.protocol.pack_req1(
++                self.target_speed_rpm,
++                self.target_angle_deg,
++                self.brake_pct,
++                self.park_release
++            )
++            self.driver.send(id1, data1)
++
++            # Pack and send Req2
++            id2, data2 = self.protocol.pack_req2(**self.aux_state)
++            self.driver.send(id2, data2)
++
++        # Publish Status — only after receiving real CAN feedback (avoid publishing uninitialized state)
++        now = time.monotonic()
++        if self._feedback_is_fresh(now):
++            self.current_status.header.stamp = self.get_clock().now().to_msg()
++            self.status_pub.publish(self.current_status)
++            self._feedback_timeout_active = False
++        elif self._feedback_received and not self._feedback_timeout_active:
++            self.get_logger().warn('Vehicle feedback timeout: suppressing stale /vehicle/status.')
++            self._feedback_timeout_active = True
+ 
+     def check_can_messages(self):
+         if not self.driver.bus:
+@@ -192,10 +360,12 @@ class VehicleInterfaceNode(Node):
+             pass # Timeout or error
+ 
+     def process_can_message(self, msg):
++        feedback_valid = False
+         print(f'CAN ID: {msg.arbitration_id}')
+         if msg.arbitration_id == 0x701:
+             data = self.protocol.unpack_fb1(msg.data) # 解析0x701：核心状态（速度、转向、制动、驻车）
+             if data:
++                feedback_valid = True
+                 self.current_status.current_speed_rpm = float(data['speed_rpm'])
+                 self.current_status.current_steering_angle_deg = float(data['angle_deg'])
+                 self.current_status.current_brake_pedal = int(data['brake_pct'])
+@@ -205,6 +375,7 @@ class VehicleInterfaceNode(Node):
+         elif msg.arbitration_id == 0x702:
+             data = self.protocol.unpack_fb2(msg.data) # 解析0x702：辅助状态（灯光、控制模式、紧急停车等）
+             if data:
++                feedback_valid = True
+                 self.current_status.current_control_mode = int(data['control_mode'])
+                 self.current_status.headlamp_state = bool(data['headlamp'])
+                 self.current_status.left_net_state = bool(data['left_net'])
+@@ -220,10 +391,20 @@ class VehicleInterfaceNode(Node):
+         elif msg.arbitration_id == 0x703:
+             data = self.protocol.unpack_fb3(msg.data)# 解析0x703：电池状态（电压、电流、SOC）
+             if data:
++                feedback_valid = True
+                 self.current_status.battery_voltage = float(data['voltage'])
+                 self.current_status.battery_current = float(data['current'])
+-                self.current_status.battery_soc = int(data['soc'])
+-                print(f'电池状态: 电压{self.current_status.battery_voltage}V, 电流{self.current_status.battery_current}A, SOC{self.current_status.battery_soc}%')
++                if data['soc'] is not None:
++                    self.current_status.battery_soc = int(data['soc'])
++                elif not self._battery_soc_unavailable_warned:
++                    self.get_logger().warn(
++                        '0x703 SOC bytes are not protocol-verified; battery_soc is unavailable and must not be used.'
++                    )
++                    self._battery_soc_unavailable_warned = True
++
++        if feedback_valid:
++            self._feedback_received = True
++            self._last_feedback_time = time.monotonic()
+ 
+ def main(args=None):
+     rclpy.init(args=args)

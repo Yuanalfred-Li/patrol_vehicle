@@ -88,6 +88,20 @@ else
     echo "[patrol] MINS200 网络配置完成。"
 fi
 
+echo "[patrol] 配置 can0：500000 bit/s..."
+
+sudo -v
+sudo ip link set can0 down 2>/dev/null || true
+sudo ip link set can0 type can \
+    bitrate 500000 \
+    sample-point 0.750 \
+    listen-only off \
+    berr-reporting on \
+    restart-ms 0
+sudo ip link set can0 up
+
+sleep 0.5
+
 echo "[patrol] 启动 MINS200 和底盘 CAN 接口..."
 
 setsid ros2 launch \
@@ -95,6 +109,7 @@ setsid ros2 launch \
     hardware.launch.py \
     start_mins200:=true \
     start_vehicle_can:=true \
+    can_transmit_enabled:=true \
     > "$LAUNCH_LOG" 2>&1 &
 
 LAUNCH_PID=$!
@@ -150,8 +165,8 @@ for _ in $(seq 1 20); do
         > "$RUN_DIR/can0.txt" \
         2>&1 || true
 
-    if grep -q \
-        "can state ERROR-ACTIVE" \
+    if grep -Eq \
+        'can( <[^>]+>)? state ERROR-ACTIVE' \
         "$RUN_DIR/can0.txt"; then
         CAN_OK=1
         break

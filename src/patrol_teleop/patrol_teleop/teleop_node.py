@@ -114,7 +114,7 @@ class PatrolTeleop(Node):
         self.get_logger().warning(response.message)
 
     def read_key(self) -> Optional[str]:
-        """清空SSH终端中已积压的字符，只采用最新按键。"""
+        """清空SSH终端中已积压的字符，只采用最新按键."""
         fd = sys.stdin.fileno()
         latest_key = None
 
@@ -226,8 +226,16 @@ class PatrolTeleop(Node):
         command.target_steering_angle_deg = (
             target_steering
         )
-        command.brake_pedal = 0
-        command.parking_brake = 1
+        # Only release brake and parking when a real
+        # forward/reverse motion command is requested.
+        drive_requested = abs(target_speed) > 0.1
+
+        command.brake_pedal = (
+            0 if drive_requested else 100
+        )
+        command.parking_brake = (
+            1 if drive_requested else 0
+        )
         command.control_mode = 1
 
         command.left_turn_light = (
