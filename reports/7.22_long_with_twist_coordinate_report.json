@@ -1,0 +1,50 @@
+{
+  "description": "WGS84 经纬度与 YAML x/y 坐标内部一致性检查",
+  "warning": "内部一致性通过不代表 GNSS 绝对位置准确；它只说明两种坐标表示相互吻合。",
+  "routes": [
+    {
+      "file": "routes/7.22_long_with_twist.yaml",
+      "label": "原始路线",
+      "point_count": 160,
+      "origin": {
+        "latitude": 34.80966439808014,
+        "longitude": 113.47612273533589,
+        "altitude": 114.05380287207663
+      },
+      "length_from_saved_xy_m": 55.641107336232054,
+      "coordinate_consistency": {
+        "threshold_m": 0.05,
+        "mean_horizontal_error_m": 0.0,
+        "median_horizontal_error_m": 0.0,
+        "p95_horizontal_error_m": 0.0,
+        "maximum_horizontal_error_m": 0.0,
+        "maximum_error_index": 0,
+        "mean_dx_m": 0.0,
+        "mean_dy_m": 0.0,
+        "consistent": true
+      }
+    },
+    {
+      "file": "routes/7.22_long_with_twist_smooth.yaml",
+      "label": "平滑路线",
+      "point_count": 131,
+      "origin": {
+        "latitude": 34.80966439808014,
+        "longitude": 113.47612273533589,
+        "altitude": 114.05380287207663
+      },
+      "length_from_saved_xy_m": 51.616160546448796,
+      "coordinate_consistency": {
+        "threshold_m": 0.05,
+        "mean_horizontal_error_m": 8.186616216395227e-10,
+        "median_horizontal_error_m": 7.438920052387594e-10,
+        "p95_horizontal_error_m": 1.5094942839830616e-09,
+        "maximum_horizontal_error_m": 2.2177806409824384e-09,
+        "maximum_error_index": 33,
+        "mean_dx_m": -7.034925285915924e-11,
+        "mean_dy_m": -4.658933997481698e-10,
+        "consistent": true
+      }
+    }
+  ]
+}

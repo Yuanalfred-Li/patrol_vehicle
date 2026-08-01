@@ -70,16 +70,24 @@ PY
 
 node_exists() {
     local node_name="$1"
+    local nodes
 
-    ros2 node list 2>/dev/null |
-        grep -Fxq "$node_name"
+    nodes="$(
+        timeout 3 ros2 node list 2>/dev/null || true
+    )"
+
+    grep -Fxq "$node_name" <<< "$nodes"
 }
 
 service_exists() {
     local service_name="$1"
+    local services
 
-    ros2 service list 2>/dev/null |
-        grep -Fxq "$service_name"
+    services="$(
+        timeout 3 ros2 service list 2>/dev/null || true
+    )"
+
+    grep -Fxq "$service_name" <<< "$services"
 }
 
 check_real_command_chain() {

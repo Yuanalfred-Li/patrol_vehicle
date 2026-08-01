@@ -120,7 +120,7 @@ entry_executor:
   maximum_steering_request: 400.0
 
   waypoint_tolerance_m: 0.08
-  maximum_pass_lateral_error_m: 0.20
+  maximum_pass_lateral_error_m: 0.80
   maximum_start_error_m: 0.60
   gear_change_pause_sec: 0.80
   maximum_localization_age_sec: 0.50

@@ -337,6 +337,15 @@ class PatrolEntryExecutor(Node):
             ),
         )
 
+        maximum_pass_lateral_error = max(
+            0.05,
+            float(
+                self.get_parameter(
+                    'maximum_pass_lateral_error'
+                ).value
+            ),
+        )
+
         while self.target_index < len(
             self.entry_path.poses
         ):
@@ -390,9 +399,16 @@ class PatrolEntryExecutor(Node):
                     + relative_y * segment_y
                 ) / segment_length_squared
 
-                # 车辆投影已经越过线段终点时切换下一段。
-                # 真正的偏航安全检查在后面按线段距离完成。
-                reached = progress >= 1.0
+                lateral_error = abs(
+                    relative_x * segment_y
+                    - relative_y * segment_x
+                ) / math.sqrt(segment_length_squared)
+
+                reached = (
+                    progress >= 1.0
+                    and lateral_error
+                    <= maximum_pass_lateral_error
+                )
 
             if not reached:
                 break
@@ -470,58 +486,10 @@ class PatrolEntryExecutor(Node):
             self.target_index
         ]
 
-        previous_target = self.entry_path.poses[
-            self.target_index - 1
-        ]
-
-        segment_x = (
-            current_target.position.x
-            - previous_target.position.x
+        current_target_distance = math.hypot(
+            current_target.position.x - current_x,
+            current_target.position.y - current_y,
         )
-        segment_y = (
-            current_target.position.y
-            - previous_target.position.y
-        )
-        segment_length_squared = (
-            segment_x * segment_x
-            + segment_y * segment_y
-        )
-
-        if segment_length_squared <= 1.0e-9:
-            tracking_error = math.hypot(
-                current_target.position.x - current_x,
-                current_target.position.y - current_y,
-            )
-        else:
-            projection = (
-                (
-                    current_x
-                    - previous_target.position.x
-                ) * segment_x
-                + (
-                    current_y
-                    - previous_target.position.y
-                ) * segment_y
-            ) / segment_length_squared
-
-            projection = max(
-                0.0,
-                min(1.0, projection),
-            )
-
-            closest_x = (
-                previous_target.position.x
-                + projection * segment_x
-            )
-            closest_y = (
-                previous_target.position.y
-                + projection * segment_y
-            )
-
-            tracking_error = math.hypot(
-                current_x - closest_x,
-                current_y - closest_y,
-            )
 
         maximum_tracking_error = max(
             0.20,
@@ -532,13 +500,11 @@ class PatrolEntryExecutor(Node):
             ),
         )
 
-        if tracking_error > maximum_tracking_error:
+        if current_target_distance > maximum_tracking_error:
             self.safety_stop(
-                f'entry path lateral error too large: '
-                f'{tracking_error:.2f}m > '
-                f'{maximum_tracking_error:.2f}m; '
-                f'segment={self.target_index - 1}'
-                f'->{self.target_index}'
+                f'entry tracking error too large: '
+                f'{current_target_distance:.2f}m > '
+                f'{maximum_tracking_error:.2f}m'
             )
             return
 
