@@ -1,5 +1,26 @@
 # 动态限速改动完整回归报告（2026-08-05）
 
+## 0b. 更新（同日，前向障碍守护接入后）
+
+新增 `patrol_obstacle_guard`（订阅前方净空 Range + 健康心跳，分级限速/停车）+ command_manager 仲裁集成（`obstacle_guard_enabled` 门控，AUTO 下取低速度，守护超时按失效停车）。默认关闭，不影响原链路。
+
+验证（tools/tests/test_obstacle_guard.py，完整任务 + 7 场景时间窗）：
+
+| 场景 | 结果 |
+|---|---|
+| 净空（接管恢复区） | PASS（守卫 CLEAR） |
+| 障碍 2.5m | PASS（8 RPM 限速） |
+| 障碍 0.8m | PASS（停车 + 制动） |
+| 障碍 1.8m（超滞回） | PASS（恢复 8 RPM） |
+| 净空 | PASS（恢复直通） |
+| health 断流 | PASS（失效停车） |
+| health 恢复 | PASS（恢复直通） |
+| 任务结果 | MISSION_SUCCEEDED |
+
+既有回归：主测试 PASS（守卫关闭时 AUTO 链路无变化）、1.5m 弯单跑 PASS。批次连跑仍偶发 §17.2 启动竞态（与本改动无关，已单跑确认）。
+
+
+
 ## 0. 更新（同日，QoS 竞态修复后复验）
 
 修复内容：`/patrol/pose`、`/patrol/localization_status` 发布端（localization）与订阅端（planner/executor/follower/recorder）全部改为 TRANSIENT_LOCAL，晚启动订阅者立即可得最近值，从根上消除 §17.2 启动竞态。提交：`<commit 见 git log>`。

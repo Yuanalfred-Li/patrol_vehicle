@@ -171,18 +171,38 @@ auto_command_mux:
 command_manager:
   manual_command_topic: /patrol/manual_command
   auto_command_topic: /patrol/auto_command
+  guard_command_topic: /patrol/guard_command
   vehicle_command_topic: /vehicle/command
   mode_topic: /patrol/control_mode
   set_mode_service: /patrol/set_control_mode
 
   publish_rate_hz: 20.0
   command_timeout_sec: 0.50
+  guard_timeout_sec: 0.60
+  obstacle_guard_enabled: false
 
   maximum_speed_rpm: 40.0
   maximum_steering_request: 400.0
 
   stop_brake_pedal: 100
   stop_parking_brake: 0
+
+obstacle_guard:
+  distance_topic: /gap_follower/front_clearance_distance
+  health_topic: /gap_follower/front_clearance_health
+  guard_command_topic: /patrol/guard_command
+  status_topic: /patrol/obstacle_guard/status
+
+  control_rate_hz: 20.0
+  stop_distance_m: 1.2
+  slow_distance_m: 3.0
+  slow_speed_rpm: 8.0
+  clear_speed_rpm: 1000.0
+  stop_hysteresis_m: 0.3
+  clear_hold_frames: 5
+
+  distance_timeout_sec: 0.5
+  health_timeout_sec: 1.0
 
 mission_manager:
   status_topic: /patrol/mission/status

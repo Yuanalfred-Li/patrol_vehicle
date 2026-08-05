@@ -58,6 +58,11 @@ def generate_launch_description():
         ),
 
         DeclareLaunchArgument(
+            'start_obstacle_guard',
+            default_value='false',
+        ),
+
+        DeclareLaunchArgument(
             'vehicle_command_topic',
             default_value='/patrol/test_vehicle_command',
         ),
@@ -89,6 +94,8 @@ def generate_launch_description():
                     LaunchConfiguration('record_route_file'),
                 'start_localization':
                     LaunchConfiguration('start_localization'),
+                'start_obstacle_guard':
+                    LaunchConfiguration('start_obstacle_guard'),
                 'vehicle_command_topic':
                     LaunchConfiguration('vehicle_command_topic'),
             }.items(),

@@ -12,6 +12,7 @@ from launch.actions import (
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 from patrol_bringup.config_loader import (
     load_patrol_config,
@@ -38,6 +39,9 @@ def launch_setup(context):
 
     start_localization = LaunchConfiguration(
         'start_localization'
+    )
+    start_obstacle_guard = LaunchConfiguration(
+        'start_obstacle_guard'
     )
 
     route_path = Path(route_file)
@@ -205,6 +209,17 @@ def launch_setup(context):
     command_manager_parameters[
         'vehicle_command_topic'
     ] = vehicle_command_topic
+    command_manager_parameters[
+        'obstacle_guard_enabled'
+    ] = ParameterValue(
+        LaunchConfiguration('start_obstacle_guard'),
+        value_type=bool,
+    )
+
+    obstacle_guard_parameters = section_parameters(
+        config,
+        'obstacle_guard',
+    )
 
     mission_manager_parameters = section_parameters(
         config,
@@ -301,6 +316,16 @@ def launch_setup(context):
         ),
 
         Node(
+            package='patrol_obstacle_guard',
+            executable='obstacle_guard_node',
+            name='patrol_obstacle_guard',
+            output='screen',
+            emulate_tty=True,
+            parameters=[obstacle_guard_parameters],
+            condition=IfCondition(start_obstacle_guard),
+        ),
+
+        Node(
             package='patrol_mission_manager',
             executable='mission_manager_node',
             name='patrol_mission_manager',
@@ -346,6 +371,15 @@ def generate_launch_description():
             'start_localization',
             default_value='true',
             description='Start patrol localization node',
+        ),
+
+        DeclareLaunchArgument(
+            'start_obstacle_guard',
+            default_value='false',
+            description=(
+                'Start obstacle guard node and enable guard '
+                'arbitration (requires /scan upstream chain)'
+            ),
         ),
 
         DeclareLaunchArgument(

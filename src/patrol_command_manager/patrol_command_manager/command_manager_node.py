@@ -31,6 +31,10 @@ class PatrolCommandManager(Node):
             '/patrol/auto_command',
         )
         self.declare_parameter(
+            'guard_command_topic',
+            '/patrol/guard_command',
+        )
+        self.declare_parameter(
             'vehicle_command_topic',
             '/vehicle/command',
         )
@@ -45,6 +49,8 @@ class PatrolCommandManager(Node):
 
         self.declare_parameter('publish_rate_hz', 20.0)
         self.declare_parameter('command_timeout_sec', 0.50)
+        self.declare_parameter('guard_timeout_sec', 0.60)
+        self.declare_parameter('obstacle_guard_enabled', False)
 
         self.declare_parameter('max_speed_rpm', 40.0)
         self.declare_parameter('max_steering_request', 400.0)
@@ -57,6 +63,9 @@ class PatrolCommandManager(Node):
         )
         auto_topic = str(
             self.get_parameter('auto_command_topic').value
+        )
+        guard_topic = str(
+            self.get_parameter('guard_command_topic').value
         )
         output_topic = str(
             self.get_parameter('vehicle_command_topic').value
@@ -73,9 +82,17 @@ class PatrolCommandManager(Node):
 
         self.latest_manual: Optional[VehicleCommand] = None
         self.latest_auto: Optional[VehicleCommand] = None
+        self.latest_guard: Optional[VehicleCommand] = None
 
         self.manual_receive_time = 0.0
         self.auto_receive_time = 0.0
+        self.guard_receive_time = 0.0
+
+        self.obstacle_guard_enabled = bool(
+            self.get_parameter(
+                'obstacle_guard_enabled'
+            ).value
+        )
 
         self.output_pub = self.create_publisher(
             VehicleCommand,
@@ -98,6 +115,12 @@ class PatrolCommandManager(Node):
             VehicleCommand,
             auto_topic,
             self.auto_callback,
+            20,
+        )
+        self.create_subscription(
+            VehicleCommand,
+            guard_topic,
+            self.guard_callback,
             20,
         )
 
@@ -134,6 +157,10 @@ class PatrolCommandManager(Node):
     def auto_callback(self, msg: VehicleCommand) -> None:
         self.latest_auto = msg
         self.auto_receive_time = time.monotonic()
+
+    def guard_callback(self, msg: VehicleCommand) -> None:
+        self.latest_guard = msg
+        self.guard_receive_time = time.monotonic()
 
     def set_mode_callback(
         self,
@@ -204,12 +231,61 @@ class PatrolCommandManager(Node):
                 output = self.sanitize_command(
                     self.latest_auto
                 )
+                if self.obstacle_guard_enabled:
+                    output = self.apply_guard(output, now)
 
         else:
             output = self.make_stop_command()
 
         self.output_pub.publish(output)
         self.publish_mode()
+
+    def apply_guard(
+        self,
+        output: VehicleCommand,
+        now: float,
+    ) -> VehicleCommand:
+        """AUTO 模式下叠加障碍守护：取更低速度；守护失效则停车。
+
+        守护命令超时视为障碍保护不可用：不得在无保护下继续自动运行，
+        按失效停车处理。MANUAL 模式不调用本函数。
+        """
+        guard_timeout = abs(float(
+            self.get_parameter('guard_timeout_sec').value
+        ))
+
+        if (
+            self.latest_guard is None
+            or now - self.guard_receive_time > guard_timeout
+        ):
+            return self.make_motion_stop_command()
+
+        guard = self.sanitize_command(self.latest_guard)
+
+        if guard.target_speed_rpm >= output.target_speed_rpm:
+            return output
+
+        output.target_speed_rpm = guard.target_speed_rpm
+        output.brake_pedal = max(
+            output.brake_pedal,
+            guard.brake_pedal,
+        )
+
+        # 合并守护后重新判定运动/驻车状态。
+        motion_requested = (
+            abs(output.target_speed_rpm) > 0.1
+            and output.brake_pedal < 100
+        )
+
+        if motion_requested:
+            output.parking_brake = 1
+        else:
+            output.target_speed_rpm = 0.0
+            output.brake_pedal = 100
+            output.parking_brake = 0
+            output.brake_light = True
+
+        return output
 
     def sanitize_command(
         self,
