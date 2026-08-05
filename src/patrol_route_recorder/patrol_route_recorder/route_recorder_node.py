@@ -14,6 +14,7 @@ from nav_msgs.msg import Path as NavPath
 from patrol_interfaces.msg import LocalizationStatus
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from std_srvs.srv import Trigger
 
 
@@ -168,17 +169,22 @@ class PatrolRouteRecorder(Node):
         self.started_at = ''
         self.last_warning_time = 0.0
 
+        # 与 /patrol/pose 发布端保持一致，
+        # 晚启动订阅时立即收到最近位姿，避免启动竞态。
+        state_qos = QoSProfile(depth=20)
+        state_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+
         self.create_subscription(
             LocalizationStatus,
             self.status_topic,
             self.status_callback,
-            20,
+            state_qos,
         )
         self.create_subscription(
             PoseStamped,
             self.pose_topic,
             self.pose_callback,
-            20,
+            state_qos,
         )
 
         self.path_pub = self.create_publisher(

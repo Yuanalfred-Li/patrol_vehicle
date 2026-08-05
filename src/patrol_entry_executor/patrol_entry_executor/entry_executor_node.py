@@ -118,11 +118,16 @@ class PatrolEntryExecutor(Node):
             path_qos,
         )
 
+        # 与 /patrol/pose 发布端保持一致，
+        # 晚启动订阅时立即收到最近位姿，避免启动竞态。
+        state_qos = QoSProfile(depth=20)
+        state_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+
         self.create_subscription(
             PoseStamped,
             str(self.get_parameter('pose_topic').value),
             self.pose_callback,
-            20,
+            state_qos,
         )
 
         self.create_subscription(
@@ -133,7 +138,7 @@ class PatrolEntryExecutor(Node):
                 ).value
             ),
             self.status_callback,
-            20,
+            state_qos,
         )
 
         self.command_pub = self.create_publisher(

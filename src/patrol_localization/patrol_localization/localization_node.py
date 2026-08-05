@@ -15,6 +15,7 @@ from patrol_interfaces.srv import LoadRoute
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.parameter import Parameter
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import NavSatFix
 from tf2_ros import TransformBroadcaster
 
@@ -162,10 +163,15 @@ class PatrolLocalization(Node):
         self.gps_receive_time = 0.0
         self.imu_receive_time = 0.0
 
+        # pose 与状态供后订阅节点立即可得最近值，
+        # 避免控制节点晚启动时错过全部消息（启动竞态）。
+        state_qos = QoSProfile(depth=10)
+        state_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+
         self.pose_pub = self.create_publisher(
             PoseStamped,
             self.pose_topic,
-            10,
+            state_qos,
         )
         self.odom_pub = self.create_publisher(
             Odometry,
@@ -175,7 +181,7 @@ class PatrolLocalization(Node):
         self.status_pub = self.create_publisher(
             LocalizationStatus,
             self.status_topic,
-            10,
+            state_qos,
         )
 
         self.create_subscription(
