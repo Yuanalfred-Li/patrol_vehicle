@@ -24,9 +24,9 @@ ORIGIN_LATITUDE = 34.0
 ORIGIN_LONGITUDE = 113.0
 ORIGIN_ALTITUDE = 100.0
 
-ROUTE_FILE = Path("/tmp/test_absolute_full_route.yaml")
-RECORD_FILE = Path("/tmp/test_absolute_recorded_route.yaml")
-LOG_FILE = Path("/tmp/test_absolute_full_mission.log")
+ROUTE_FILE = Path("/tmp/test_tight_curve_bad_handoff.yaml")
+RECORD_FILE = Path("/tmp/test_tight_curve_bad_handoff_recorded.yaml")
+LOG_FILE = Path("/tmp/test_tight_curve_bad_handoff_launch.log")
 
 WGS84_A = 6378137.0
 WGS84_E2 = 6.69437999014e-3
@@ -36,7 +36,7 @@ MAX_STEERING_DEG = 30.0
 MAX_STEERING_REQUEST = 400.0
 RPM_TO_MPS = 0.01
 DT = 0.05
-MAX_TEST_TIME = 80.0
+MAX_TEST_TIME = 120.0
 
 
 def enu_to_geodetic(east, north, up):
@@ -76,21 +76,117 @@ def enu_to_geodetic(east, north, up):
     )
 
 
-def make_route():
-    local_points = [
-        (0.0, 0.0),
-        (1.5, 0.0),
-        (3.0, 0.0),
-    ]
+def build_route_points():
+    """2 m直线 + 半径1.5 m的90度弯道 + 3 m直线。"""
+    points = []
 
+    # 第一段：沿东向直行2 m。
+    for index in range(9):
+        points.append((0.25 * index, 0.0))
+
+    # 第二段：半径2 m的90度左转圆弧。
+    center_east = 2.0
+    center_north = 1.5
+    radius = 1.5
+    arc_segments = 6
+
+    for index in range(1, arc_segments + 1):
+        angle = math.radians(
+            -90.0 + 90.0 * index / arc_segments
+        )
+        points.append((
+            center_east + radius * math.cos(angle),
+            center_north + radius * math.sin(angle),
+        ))
+
+    # 第三段：沿北向直行3 m。
+    for index in range(1, 13):
+        points.append((3.5, 1.5 + 0.25 * index))
+
+    return points
+
+
+ROUTE_LOCAL_POINTS = build_route_points()
+
+
+def route_point_yaw(index):
+    if index < len(ROUTE_LOCAL_POINTS) - 1:
+        point_a = ROUTE_LOCAL_POINTS[index]
+        point_b = ROUTE_LOCAL_POINTS[index + 1]
+    else:
+        point_a = ROUTE_LOCAL_POINTS[index - 1]
+        point_b = ROUTE_LOCAL_POINTS[index]
+
+    return math.atan2(
+        point_b[1] - point_a[1],
+        point_b[0] - point_a[0],
+    )
+
+
+def distance_to_route(east, north):
+    minimum_distance = float("inf")
+
+    for point_a, point_b in zip(
+        ROUTE_LOCAL_POINTS[:-1],
+        ROUTE_LOCAL_POINTS[1:],
+    ):
+        ax, ay = point_a
+        bx, by = point_b
+
+        dx = bx - ax
+        dy = by - ay
+        length_squared = dx * dx + dy * dy
+
+        if length_squared <= 1e-12:
+            projection = 0.0
+        else:
+            projection = (
+                (east - ax) * dx
+                + (north - ay) * dy
+            ) / length_squared
+
+        projection = max(0.0, min(1.0, projection))
+
+        closest_east = ax + projection * dx
+        closest_north = ay + projection * dy
+
+        distance = math.hypot(
+            east - closest_east,
+            north - closest_north,
+        )
+
+        minimum_distance = min(
+            minimum_distance,
+            distance,
+        )
+
+    return minimum_distance
+
+
+def make_route():
     waypoints = []
 
-    for index, (east, north) in enumerate(local_points):
+    total_length = sum(
+        math.hypot(
+            point_b[0] - point_a[0],
+            point_b[1] - point_a[1],
+        )
+        for point_a, point_b in zip(
+            ROUTE_LOCAL_POINTS[:-1],
+            ROUTE_LOCAL_POINTS[1:],
+        )
+    )
+
+    for index, (east, north) in enumerate(
+        ROUTE_LOCAL_POINTS
+    ):
         latitude, longitude, altitude = enu_to_geodetic(
             east,
             north,
             0.0,
         )
+
+        ros_yaw = route_point_yaw(index)
 
         waypoints.append({
             "index": index,
@@ -100,8 +196,10 @@ def make_route():
             "latitude": latitude,
             "longitude": longitude,
             "altitude": altitude,
-            "heading_deg": 90.0,
-            "ros_yaw_deg": 0.0,
+            "heading_deg": (
+                90.0 - math.degrees(ros_yaw)
+            ) % 360.0,
+            "ros_yaw_deg": math.degrees(ros_yaw),
             "gps_status": 2,
             "nsv1": 20,
             "nsv2": 20,
@@ -122,7 +220,7 @@ def make_route():
         },
         "summary": {
             "point_count": len(waypoints),
-            "total_length": 3.0,
+            "total_length": total_length,
         },
         "waypoints": waypoints,
     }
@@ -453,9 +551,16 @@ try:
     entry_switches = 0
     route_forward_steps = 0
 
+    max_abs_route_steering = 0.0
+    route_saturation_steps = 0
+    max_route_path_error = 0.0
+
     previous_entry_direction = 0
     succeeded = False
     failed = False
+
+    previous_active_source = "STOP"
+    handoff_error_injected = False
 
     start_time = time.monotonic()
     last_print_time = start_time
@@ -484,6 +589,31 @@ try:
             == TaskStatus.RUNNING
         ):
             active_source = "ROUTE"
+
+        if (
+            active_source == "ROUTE"
+            and previous_active_source != "ROUTE"
+            and not handoff_error_injected
+        ):
+            # 模拟当前实车入轨交接状态：
+            # 横向误差约0.35 m，航向误差约18.3度。
+            north += 0.35
+            ros_yaw += math.radians(18.3)
+
+            ros_yaw = math.atan2(
+                math.sin(ros_yaw),
+                math.cos(ros_yaw),
+            )
+
+            handoff_error_injected = True
+
+            print(
+                "INJECTED_HANDOFF_ERROR:",
+                "lateral=0.35m",
+                "heading=18.3deg",
+            )
+
+        previous_active_source = active_source
 
         if vehicle_command is not None:
             rpm = float(
@@ -520,6 +650,19 @@ try:
                 and rpm > 0.1
             ):
                 route_forward_steps += 1
+
+                max_abs_route_steering = max(
+                    max_abs_route_steering,
+                    abs(steering_request),
+                )
+
+                if abs(steering_request) >= 390.0:
+                    route_saturation_steps += 1
+
+                max_route_path_error = max(
+                    max_route_path_error,
+                    distance_to_route(east, north),
+                )
 
             if abs(rpm) > 0.1:
                 steering_request = max(
@@ -604,15 +747,17 @@ try:
     )
 
     route_end_error = math.hypot(
-        east - 3.0,
-        north,
+        east - 3.5,
+        north - 4.5,
     )
+
+    target_yaw = math.pi / 2.0
 
     route_heading_error = abs(
         math.degrees(
             math.atan2(
-                math.sin(ros_yaw),
-                math.cos(ros_yaw),
+                math.sin(ros_yaw - target_yaw),
+                math.cos(ros_yaw - target_yaw),
             )
         )
     )
@@ -626,6 +771,14 @@ try:
         and route_forward_steps > 0
         and route_end_error <= 0.35
         and route_heading_error <= 10.0
+    )
+
+    saturation_time = route_saturation_steps * DT
+
+    stable = (
+        passed
+        and max_route_path_error <= 0.80
+        and saturation_time <= 1.0
     )
 
     print()
@@ -647,6 +800,26 @@ try:
     print(
         "ROUTE_FORWARD_STEPS:",
         route_forward_steps,
+    )
+    print(
+        "HANDOFF_ERROR_INJECTED:",
+        handoff_error_injected,
+    )
+    print(
+        "MAX_ABS_ROUTE_STEERING:",
+        round(max_abs_route_steering, 3),
+    )
+    print(
+        "ROUTE_SATURATION_STEPS:",
+        route_saturation_steps,
+    )
+    print(
+        "ROUTE_SATURATION_TIME:",
+        round(saturation_time, 3),
+    )
+    print(
+        "MAX_ROUTE_PATH_ERROR:",
+        round(max_route_path_error, 3),
     )
     print("FINAL_EAST:", round(east, 3))
     print("FINAL_NORTH:", round(north, 3))
@@ -673,6 +846,10 @@ try:
     print(
         "TEST_RESULT:",
         "PASS" if passed else "FAIL",
+    )
+    print(
+        "STABILITY_RESULT:",
+        "PASS" if stable else "FAIL",
     )
 
 finally:

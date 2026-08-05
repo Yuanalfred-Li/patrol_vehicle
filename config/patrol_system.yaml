@@ -141,9 +141,16 @@ route_follower:
   maximum_mechanical_steering_deg: 30.0
   maximum_steering_request: 400.0
 
-  minimum_speed_rpm: 12.0
-  maximum_speed_rpm: 20.0
+  minimum_speed_rpm: 10.0
+  maximum_speed_rpm: 15.0
   slowdown_distance_m: 2.0
+
+  handoff_recovery_distance_m: 3.0
+  handoff_recovery_speed_rpm: 8.0
+
+  steering_slowdown_start_request: 180.0
+  steering_slowdown_full_request: 320.0
+  steering_slowdown_speed_rpm: 8.0
 
   maximum_entry_path_error_m: 1.0
   maximum_entry_heading_error_deg: 180.0

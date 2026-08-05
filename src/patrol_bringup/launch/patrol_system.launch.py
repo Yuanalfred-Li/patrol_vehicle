@@ -134,6 +134,8 @@ def launch_setup(context):
             'maximum_speed_rpm': 'max_speed_rpm',
             'slowdown_distance_m':
                 'slowdown_distance',
+            'handoff_recovery_distance_m':
+                'handoff_recovery_distance',
             'maximum_entry_path_error_m':
                 'maximum_entry_path_error',
             'maximum_tracking_error_m':

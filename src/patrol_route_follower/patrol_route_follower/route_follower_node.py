@@ -319,6 +319,27 @@ class PatrolRouteFollower(Node):
         self.declare_parameter('slowdown_distance', 2.0)
 
         self.declare_parameter(
+            'handoff_recovery_distance',
+            3.0,
+        )
+        self.declare_parameter(
+            'handoff_recovery_speed_rpm',
+            8.0,
+        )
+        self.declare_parameter(
+            'steering_slowdown_start_request',
+            180.0,
+        )
+        self.declare_parameter(
+            'steering_slowdown_full_request',
+            320.0,
+        )
+        self.declare_parameter(
+            'steering_slowdown_speed_rpm',
+            8.0,
+        )
+
+        self.declare_parameter(
             'maximum_entry_path_error',
             1.0,
         )
@@ -424,6 +445,7 @@ class PatrolRouteFollower(Node):
         self.enabled = False
         self.progress_initialized = False
         self.progress_s = 0.0
+        self.route_start_progress_s = 0.0
         self.last_log_time = 0.0
         self.last_hold_status_time = 0.0
         self.last_hold_status_state = ''
@@ -788,6 +810,7 @@ class PatrolRouteFollower(Node):
 
         self.progress_initialized = False
         self.progress_s = 0.0
+        self.route_start_progress_s = 0.0
         self.last_log_time = 0.0
         self.last_hold_status_time = 0.0
         self.last_hold_status_state = ''
@@ -834,6 +857,7 @@ class PatrolRouteFollower(Node):
         if not request.data:
             self.enabled = False
             self.progress_initialized = False
+            self.route_start_progress_s = 0.0
             self.gnss_hold.reset()
             self.last_hold_status_state = ''
             self.publish_stop()
@@ -914,6 +938,7 @@ class PatrolRouteFollower(Node):
             return response
 
         self.progress_s = projection['s']
+        self.route_start_progress_s = self.progress_s
         self.progress_initialized = True
         self.gnss_hold.reset()
         self.last_hold_status_time = 0.0
@@ -1260,8 +1285,11 @@ class PatrolRouteFollower(Node):
         else:
             steering_request = 0.0
 
-        speed_rpm = self.calculate_speed(
-            remaining
+        speed_rpm, speed_limit_reason = (
+            self.calculate_speed(
+                remaining,
+                steering_request,
+            )
         )
 
         command = VehicleCommand()
@@ -1304,6 +1332,7 @@ class PatrolRouteFollower(Node):
                 f'error={projection["distance"]:.2f}m, '
                 f'remaining={remaining:.2f}m, '
                 f'speed={speed_rpm:.1f}rpm, '
+                f'speed_limit={speed_limit_reason}, '
                 f'steering={steering_request:.1f}'
             )
 
@@ -1651,7 +1680,11 @@ class PatrolRouteFollower(Node):
 
         return dict(self.points[-1])
 
-    def calculate_speed(self, remaining: float) -> float:
+    def calculate_speed(
+        self,
+        remaining: float,
+        steering_request: float,
+    ) -> Tuple[float, str]:
         maximum_speed = abs(float(
             self.get_parameter('max_speed_rpm').value
         ))
@@ -1660,7 +1693,10 @@ class PatrolRouteFollower(Node):
                 'minimum_speed_rpm'
             ).value
         ))
-        minimum_speed = min(minimum_speed, maximum_speed)
+        minimum_speed = min(
+            minimum_speed,
+            maximum_speed,
+        )
 
         slowdown_distance = max(
             0.01,
@@ -1672,16 +1708,164 @@ class PatrolRouteFollower(Node):
         )
 
         if remaining >= slowdown_distance:
-            return maximum_speed
+            base_speed = maximum_speed
+            base_reason = 'normal'
+        else:
+            ratio = max(
+                0.0,
+                min(
+                    1.0,
+                    remaining / slowdown_distance,
+                ),
+            )
 
-        ratio = max(
+            base_speed = (
+                minimum_speed
+                + ratio
+                * (maximum_speed - minimum_speed)
+            )
+            base_reason = 'endpoint'
+
+        speed_limits = [
+            (base_reason, base_speed),
+        ]
+
+        ###################################################################
+        # 正式路线刚接管后的低速恢复阶段。
+        ###################################################################
+
+        recovery_distance = max(
             0.0,
-            min(1.0, remaining / slowdown_distance),
+            float(
+                self.get_parameter(
+                    'handoff_recovery_distance'
+                ).value
+            ),
+        )
+
+        recovery_speed = min(
+            maximum_speed,
+            abs(float(
+                self.get_parameter(
+                    'handoff_recovery_speed_rpm'
+                ).value
+            )),
+        )
+
+        travelled_since_handoff = max(
+            0.0,
+            self.progress_s
+            - self.route_start_progress_s,
+        )
+
+        if (
+            recovery_distance > 1.0e-6
+            and travelled_since_handoff
+            < recovery_distance
+        ):
+            recovery_ratio = max(
+                0.0,
+                min(
+                    1.0,
+                    travelled_since_handoff
+                    / recovery_distance,
+                ),
+            )
+
+            recovery_limit = (
+                recovery_speed
+                + recovery_ratio
+                * (maximum_speed - recovery_speed)
+            )
+
+            speed_limits.append((
+                'handoff_recovery',
+                recovery_limit,
+            ))
+
+        ###################################################################
+        # 大转向请求自动限速。
+        ###################################################################
+
+        steering_start = abs(float(
+            self.get_parameter(
+                'steering_slowdown_start_request'
+            ).value
+        ))
+
+        steering_full = abs(float(
+            self.get_parameter(
+                'steering_slowdown_full_request'
+            ).value
+        ))
+
+        if steering_full < steering_start:
+            steering_start, steering_full = (
+                steering_full,
+                steering_start,
+            )
+
+        steering_speed = min(
+            maximum_speed,
+            abs(float(
+                self.get_parameter(
+                    'steering_slowdown_speed_rpm'
+                ).value
+            )),
+        )
+
+        absolute_steering = abs(
+            float(steering_request)
+        )
+
+        if (
+            steering_full
+            <= steering_start + 1.0e-6
+        ):
+            if absolute_steering >= steering_full:
+                speed_limits.append((
+                    'steering_slowdown',
+                    steering_speed,
+                ))
+
+        elif absolute_steering > steering_start:
+            steering_ratio = max(
+                0.0,
+                min(
+                    1.0,
+                    (
+                        absolute_steering
+                        - steering_start
+                    )
+                    / (
+                        steering_full
+                        - steering_start
+                    ),
+                ),
+            )
+
+            steering_limit = (
+                maximum_speed
+                - steering_ratio
+                * (maximum_speed - steering_speed)
+            )
+
+            speed_limits.append((
+                'steering_slowdown',
+                steering_limit,
+            ))
+
+        limit_reason, limited_speed = min(
+            speed_limits,
+            key=lambda item: item[1],
         )
 
         return (
-            minimum_speed
-            + ratio * (maximum_speed - minimum_speed)
+            max(
+                0.0,
+                min(maximum_speed, limited_speed),
+            ),
+            limit_reason,
         )
 
     def publish_stop(self) -> None:
