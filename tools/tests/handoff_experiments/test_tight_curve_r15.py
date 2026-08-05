@@ -553,6 +553,8 @@ try:
 
     max_abs_route_steering = 0.0
     route_saturation_steps = 0
+    route_oscillation_count = 0
+    route_strong_sign = None
     max_route_path_error = 0.0
 
     previous_entry_direction = 0
@@ -630,6 +632,22 @@ try:
 
                 if abs(steering_request) >= 390.0:
                     route_saturation_steps += 1
+
+                # 振荡检测：大转向(≥320)方向来回切换即视为振荡。
+                if abs(steering_request) >= 320.0:
+                    steering_sign = (
+                        1
+                        if steering_request > 0
+                        else -1
+                    )
+                    if (
+                        route_strong_sign is not None
+                        and steering_sign
+                        != route_strong_sign
+                    ):
+                        route_oscillation_count += 1
+
+                    route_strong_sign = steering_sign
 
                 max_route_path_error = max(
                     max_route_path_error,
@@ -750,7 +768,10 @@ try:
     stable = (
         passed
         and max_route_path_error <= 0.80
-        and saturation_time <= 1.0
+        and route_oscillation_count <= 2
+        # 失控判读：误差界（是否跑偏）+ 振荡检测（是否来回甩）。
+        # 不判控制器请求饱和——理想执行器模型下无意义，
+        # 实际执行器饱和由带滞后模型的 actuator_lag 测试判定。
     )
 
     print()
@@ -784,6 +805,10 @@ try:
     print(
         "ROUTE_SATURATION_TIME:",
         round(saturation_time, 3),
+    )
+    print(
+        "ROUTE_OSCILLATION_COUNT:",
+        route_oscillation_count,
     )
     print(
         "MAX_ROUTE_PATH_ERROR:",
