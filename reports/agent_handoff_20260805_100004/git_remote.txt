@@ -1,0 +1,2 @@
+origin	git@github.com:Yuanalfred-Li/patrol_vehicle.git (fetch)
+origin	git@github.com:Yuanalfred-Li/patrol_vehicle.git (push)

@@ -1,0 +1,40 @@
+* d36d651 (HEAD -> feature/persistent-runtime-status-gnss-hold, origin/feature/persistent-runtime-status-gnss-hold, backup/before-0728-audit-20260802_195031) 0731
+* d610cca Enable safe CAN actuation and harden patrol control
+* 24ca92a Handle missing MINS200 navigation status field
+* 61d89b0 Enable guarded GNSS heading hold for field test
+* 3789d48 Integrate guarded GNSS heading hold
+* e1010d5 Add structured GNSS degradation state model
+* 3c76be2 Show live patrol mission status in map frontend
+* 1db23ec Keep patrol runtime alive between missions
+* ae6f12b Add coordinated dynamic route loading
+* 2bd1f47 Centralize patrol runtime configuration
+* 3ccff01 Add map replay controls and protect route data
+* d9b97ec (feature/map-route-replay-ui) Add safe non-interactive route replay
+* 621a034 Move map coordinate conversion to backend
+* f632cf8 Improve vehicle marker route drawing
+* 675b00a (origin/feature/auto-route-smoothing, feature/auto-route-smoothing) Add map route editor and field test tools
+* a006840 Add automatic smoothing for recorded routes
+* ad7552f (tag: patrol-step-23-field-test-tuning, tag: patrol-before-auto-smoothing-20260722, origin/master, master) Save supervised field test routes and tracking tuning
+* 4d9f399 (tag: patrol-step-22-route-scripts, tag: patrol-route-scripts) Add route recording and replay scripts
+* aae90f8 (tag: patrol-step-21-mission-test, tag: patrol-full-mission-test) Add absolute coordinate mission integration test
+* 06c66dc (tag: patrol-step-20-absolute-route, tag: patrol-absolute-route-loading) Load patrol route from absolute coordinates
+* f1ec469 (tag: patrol-step-19-fixed-route-origin, tag: patrol-fixed-route-origin) Use absolute route origin and validate ENU localization
+* 82a6e62 (tag: patrol-step-18-hardware-launch, tag: patrol-full-launch) Add hardware and full patrol launch
+* 32e340d (tag: patrol-step-17-shutdown-fix, tag: patrol-clean-shutdown) Fix clean shutdown for recorder and auto mux
+* 82df9de (tag: patrol-step-16-launch-rename) Rename upper-layer patrol launch
+* 018a9cc (tag: patrol-step-15-control-utility) Add patrol control utility
+* 35cc818 (tag: patrol-step-14-recorder-bringup) Add route recorder to patrol bringup
+* 2373117 (tag: patrol-step-13-auto-bringup) Add autonomous patrol bringup and clean shutdown
+* 1dcdc3b (tag: patrol-step-12-goal-tolerance) Tighten route completion tolerance
+* 5fcba53 (tag: patrol-step-11-auto-command-mux) Add automatic command multiplexer
+* 2bd6be1 (tag: patrol-step-10-mission-flow) Complete automatic entry and route mission flow
+* 182149e (tag: patrol-step-09-entry-executor) Add entry path executor with gear switching
+* 452fff4 (tag: patrol-step-08-hybrid-astar) Add Hybrid A star entry path planner
+* 7e06286 (tag: patrol-step-07-pure-pursuit) Add initial pure pursuit route follower
+* 8d65da5 (tag: patrol-step-06-manual-stop-fix) Fix manual stop behavior and SSH teleop responsiveness
+* 6101bd7 (tag: patrol-step-05-keyboard-teleop) Add patrol keyboard teleoperation
+* a1583e0 (tag: patrol-step-04-command-manager) Add patrol command manager
+* 4e59c08 (tag: patrol-step-03-route-recorder) Add patrol route recorder
+* 2417051 (tag: patrol-step-02-localization) Add initial patrol localization node
+* 4bde2a9 (tag: patrol-step-01-interfaces) Add localization and control interfaces
+* 6c1f239 Initial patrol workspace skeleton

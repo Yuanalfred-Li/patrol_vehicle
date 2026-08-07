@@ -1,0 +1,5 @@
+  backup/before-0728-audit-20260802_195031    d36d651 0731
+  feature/auto-route-smoothing                675b00a [origin/feature/auto-route-smoothing] Add map route editor and field test tools
+  feature/map-route-replay-ui                 d9b97ec Add safe non-interactive route replay
+* feature/persistent-runtime-status-gnss-hold d36d651 [origin/feature/persistent-runtime-status-gnss-hold] 0731
+  master                                      ad7552f [origin/master] Save supervised field test routes and tracking tuning

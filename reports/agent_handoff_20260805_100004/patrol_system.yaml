@@ -1,0 +1,219 @@
+# 巡检小车统一运行配置
+# 修改后需要重新启动巡迹运行层，禁止巡迹过程中热修改。
+schema_version: 1
+
+system:
+  workspace: /home/nvidia/patrol_ws
+  routes_directory: /home/nvidia/patrol_ws/routes
+  logs_directory: /home/nvidia/patrol_ws/logs
+
+startup:
+  base_ready_timeout_sec: 20.0
+  runtime_ready_timeout_sec: 20.0
+  localization_ready_timeout_sec: 30.0
+  service_call_timeout_sec: 5.0
+  status_poll_interval_sec: 0.25
+
+safety:
+  maximum_origin_distance_m: 4.0
+  require_single_vehicle_command_publisher: true
+  require_vehicle_command_subscriber: true
+
+  allowed_can_states:
+    - ERROR-ACTIVE
+    - ERROR-WARNING
+
+  # ERROR-WARNING 仅允许低速现场测试。
+  allow_error_warning: true
+
+localization:
+  gps_topic: /gps/data
+  imu_status_topic: /imu/status
+  pose_topic: /patrol/pose
+  odom_topic: /patrol/odom
+  status_topic: /patrol/localization_status
+  load_route_service: /patrol/localization/load_route
+
+  frame_id: patrol_map
+  child_frame_id: base_link
+
+  # 原点从当前选中的路线文件动态读取。
+  origin_from_route: true
+
+  yaw_offset_deg: 0.0
+  minimum_nsv1: 10
+  minimum_nsv2: 10
+  maximum_data_age_sec: 1.0
+  accept_negative_navsat_status: true
+  publish_tf: true
+
+# 弱GNSS降级模式。
+# 当前先保持关闭，完成代码和台架测试后再改为 true。
+gnss_degraded:
+  enabled: true
+
+  # 从首次发现GNSS异常开始计时，防抖时间包含在3秒总时间内。
+  weak_debounce_sec: 0.3
+  maximum_hold_sec: 3.0
+
+  # 必须根据底盘最低稳定速度进行实车确认。
+  hold_speed_rpm: 8.0
+
+  maximum_heading_error_deg: 8.0
+  heading_control_kp: 8.0
+  maximum_steering_request: 80.0
+
+  maximum_imu_age_sec: 0.5
+  maximum_entry_steering_request: 80.0
+  minimum_straight_segment_length_m: 4.0
+  maximum_straight_heading_change_deg: 5.0
+
+  recovery_stable_sec: 1.0
+  recovery_max_path_error_m: 1.0
+  recovery_max_heading_error_deg: 15.0
+  recovery_max_progress_jump_m: 2.0
+
+  # 超过保持时间停车后，不允许GNSS恢复时自动重新运动。
+  auto_resume_after_stop: false
+
+entry_planner:
+  load_route_service: /patrol/entry_planner/load_route
+  pose_topic: /patrol/pose
+  localization_status_topic: /patrol/localization_status
+  entry_path_topic: /patrol/entry_path
+  entry_nav_path_topic: /patrol/entry_path_nav
+
+  wheelbase_m: 0.67
+  maximum_steering_angle_deg: 30.0
+  motion_step_m: 0.25
+  motion_substeps: 5
+
+  xy_resolution_m: 0.15
+  yaw_resolution_deg: 10.0
+  planning_margin_m: 4.0
+  maximum_expansions: 50000
+
+  goal_position_tolerance_m: 0.25
+  goal_heading_tolerance_deg: 15.0
+
+  reverse_cost_ratio: 1.15
+  gear_switch_cost: 0.60
+  steering_cost_ratio: 0.05
+  maximum_localization_age_sec: 0.5
+
+entry_executor:
+  entry_path_topic: /patrol/entry_path
+  pose_topic: /patrol/pose
+  localization_status_topic: /patrol/localization_status
+  command_topic: /patrol/entry_command
+  status_topic: /patrol/entry_executor/status
+
+  control_rate_hz: 20.0
+  forward_speed_rpm: 15.0
+  reverse_speed_rpm: 10.0
+
+  wheelbase_m: 0.67
+  lookahead_distance_m: 0.40
+  maximum_tracking_error_m: 0.80
+
+  maximum_mechanical_steering_deg: 30.0
+  maximum_steering_request: 400.0
+
+  waypoint_tolerance_m: 0.08
+  maximum_pass_lateral_error_m: 0.80
+  maximum_start_error_m: 0.60
+  gear_change_pause_sec: 0.80
+  maximum_localization_age_sec: 0.50
+
+route_follower:
+  pose_topic: /patrol/pose
+  localization_status_topic: /patrol/localization_status
+  command_topic: /patrol/route_command
+  route_path_topic: /patrol/target_path
+  lookahead_target_topic: /patrol/lookahead_target
+  status_topic: /patrol/route_follower/status
+  load_route_service: /patrol/route_follower/load_route
+
+  control_rate_hz: 20.0
+  lookahead_distance_m: 1.50
+
+  wheelbase_m: 0.67
+  maximum_mechanical_steering_deg: 30.0
+  maximum_steering_request: 400.0
+
+  minimum_speed_rpm: 10.0
+  maximum_speed_rpm: 15.0
+  slowdown_distance_m: 2.0
+
+  handoff_recovery_distance_m: 3.0
+  handoff_recovery_speed_rpm: 8.0
+
+  steering_slowdown_start_request: 180.0
+  steering_slowdown_full_request: 320.0
+  steering_slowdown_speed_rpm: 8.0
+
+  maximum_entry_path_error_m: 1.0
+  maximum_entry_heading_error_deg: 180.0
+  maximum_tracking_error_m: 1.5
+  final_tolerance_m: 0.30
+  maximum_localization_age_sec: 0.50
+
+auto_command_mux:
+  entry_command_topic: /patrol/entry_command
+  route_command_topic: /patrol/route_command
+  output_command_topic: /patrol/auto_command
+  entry_status_topic: /patrol/entry_executor/status
+  route_status_topic: /patrol/route_follower/status
+
+  command_timeout_sec: 0.50
+  publish_rate_hz: 20.0
+
+command_manager:
+  manual_command_topic: /patrol/manual_command
+  auto_command_topic: /patrol/auto_command
+  vehicle_command_topic: /vehicle/command
+  mode_topic: /patrol/control_mode
+  set_mode_service: /patrol/set_control_mode
+
+  publish_rate_hz: 20.0
+  command_timeout_sec: 0.50
+
+  maximum_speed_rpm: 40.0
+  maximum_steering_request: 400.0
+
+  stop_brake_pedal: 100
+  stop_parking_brake: 0
+
+mission_manager:
+  status_topic: /patrol/mission/status
+  entry_status_topic: /patrol/entry_executor/status
+  route_status_topic: /patrol/route_follower/status
+
+  start_service: /patrol/mission/start
+  stop_service: /patrol/mission/stop
+  load_route_service: /patrol/mission/load_route
+  localization_load_route_service: /patrol/localization/load_route
+  entry_planner_load_route_service: /patrol/entry_planner/load_route
+  route_follower_load_route_service: /patrol/route_follower/load_route
+  current_route_file: /home/nvidia/patrol_ws/routes/test_route.yaml
+  status_heartbeat_sec: 1.0
+
+
+map_frontend:
+  server_host: 0.0.0.0
+  server_port: 8080
+  state_refresh_sec: 0.50
+  startup_status_refresh_sec: 0.25
+
+  actual_trace_minimum_spacing_m: 0.20
+  clear_actual_trace_on_mission_start: true
+  retain_actual_trace_after_mission_stop: true
+
+  show_startup_stage_timing: true
+  show_localization_mode: true
+  show_gnss_hold_countdown: true
+
+logging:
+  save_effective_config: true
+  save_startup_stage_timing: true
+  save_mission_status_history: true

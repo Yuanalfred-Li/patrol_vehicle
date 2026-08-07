@@ -1,0 +1,28 @@
+# 正式路线相邻点间距
+spacing_m: 0.40
+
+# 内部计算采样间距，一般不需要调整
+dense_spacing_m: 0.10
+
+# 位置平滑尺度
+# 越大越平滑，但越容易切弯
+sigma_m: 0.80
+
+# 平滑强度，范围 0~1
+strength: 0.85
+
+# 平滑路线相对原始路线允许的最大横向偏移
+maximum_shift_m: 0.35
+
+# 起点和终点附近的渐变收敛距离
+endpoint_hold_m: 2.00
+
+# 计算轨迹方向时，向前、向后各取的路线距离
+heading_window_distance_m: 1.50
+
+# 稳定起终点与原始首尾点允许的最大偏差
+maximum_anchor_shift_m: 1.50
+
+# 异常回摆点判定参数
+spike_threshold_m: 0.20
+spike_angle_deg: 100.0
